@@ -6,6 +6,9 @@ import { ModuloParametros } from "@/components/modulos/ModuloParametros";
 import { ModuloCarregamento } from "@/components/modulos/ModuloCarregamento";
 import { ModuloMapeamento } from "@/components/modulos/ModuloMapeamento";
 import { ModuloAging } from "@/components/modulos/ModuloAging";
+import { ModuloCorrecao } from "@/components/modulos/ModuloCorrecao";
+import { ModuloAnalise } from "@/components/modulos/ModuloAnalise";
+import { ModuloExportacao } from "@/components/modulos/ModuloExportacao";
 
 export function MainContent() {
   const location = useLocation();
@@ -24,11 +27,11 @@ export function MainContent() {
       case "/aging":
         return <ModuloAging />;
       case "/correcao":
-        return <div className="p-6 text-center text-slate-600">Módulo 6: Correção - Em construção</div>;
+        return <ModuloCorrecao />;
       case "/analise":
-        return <div className="p-6 text-center text-slate-600">Módulo 7: Análise - Em construção</div>;
+        return <ModuloAnalise />;
       case "/exportacao":
-        return <div className="p-6 text-center text-slate-600">Módulo 8: Exportação - Em construção</div>;
+        return <ModuloExportacao />;
       default:
         return <ModuloConfiguracoes />;
     }
