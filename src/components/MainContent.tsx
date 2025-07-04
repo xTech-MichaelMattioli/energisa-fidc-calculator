@@ -19,6 +19,9 @@ export function MainContent() {
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [showControls, setShowControls] = useState(false);
   const [mouseY, setMouseY] = useState(0);
+  const [mouseX, setMouseX] = useState(0);
+  const [showLeftArrow, setShowLeftArrow] = useState(false);
+  const [showRightArrow, setShowRightArrow] = useState(false);
 
   const routes = [
     { path: "/", name: "Configurações" },
@@ -61,11 +64,21 @@ export function MainContent() {
     
     const handleMouseMove = (e: MouseEvent) => {
       setMouseY(e.clientY);
+      setMouseX(e.clientX);
       setShowControls(true);
+      
+      // Mostrar setas apenas quando próximo das bordas
+      const windowWidth = window.innerWidth;
+      const proximityThreshold = 100; // 100px da borda
+      
+      setShowLeftArrow(canGoPrev && e.clientX <= proximityThreshold);
+      setShowRightArrow(canGoNext && e.clientX >= windowWidth - proximityThreshold);
       
       clearTimeout(mouseTimeout);
       mouseTimeout = setTimeout(() => {
         setShowControls(false);
+        setShowLeftArrow(false);
+        setShowRightArrow(false);
       }, 3000);
     };
 
@@ -90,7 +103,7 @@ export function MainContent() {
       window.removeEventListener('wheel', handleScroll);
       clearTimeout(mouseTimeout);
     };
-  }, [currentIndex, isTransitioning]);
+  }, [currentIndex, isTransitioning, canGoPrev, canGoNext]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -204,32 +217,24 @@ export function MainContent() {
         </div>
       </header>
       
-      {/* Navigation zones - maiores e mais acessíveis */}
-      {canGoPrev && (
+      {/* Navigation zones - aparecem apenas quando mouse próximo das bordas */}
+      {showLeftArrow && (
         <div
           onClick={navigateToPrev}
           className="absolute left-0 top-16 bottom-0 w-20 z-10 cursor-pointer group/nav hover:bg-black/5 transition-colors"
         >
-          <div className={`absolute left-3 top-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 text-white rounded-full p-3 transition-all duration-300 ${
-            showControls 
-              ? 'opacity-90 scale-100' 
-              : 'opacity-50 scale-90'
-          }`}>
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 text-white rounded-full p-3 transition-all duration-300 opacity-90 scale-100">
             <ChevronLeft className="h-5 w-5" />
           </div>
         </div>
       )}
       
-      {canGoNext && (
+      {showRightArrow && (
         <div
           onClick={navigateToNext}
           className="absolute right-0 top-16 bottom-0 w-20 z-10 cursor-pointer group/nav hover:bg-black/5 transition-colors"
         >
-          <div className={`absolute right-3 top-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 text-white rounded-full p-3 transition-all duration-300 ${
-            showControls 
-              ? 'opacity-90 scale-100' 
-              : 'opacity-50 scale-90'
-          }`}>
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 text-white rounded-full p-3 transition-all duration-300 opacity-90 scale-100">
             <ChevronRight className="h-5 w-5" />
           </div>
         </div>
