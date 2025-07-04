@@ -4,6 +4,8 @@ import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { ModuloConfiguracoes } from "@/components/modulos/ModuloConfiguracoes";
 import { ModuloParametros } from "@/components/modulos/ModuloParametros";
 import { ModuloCarregamento } from "@/components/modulos/ModuloCarregamento";
+import { ModuloMapeamento } from "@/components/modulos/ModuloMapeamento";
+import { ModuloAging } from "@/components/modulos/ModuloAging";
 
 export function MainContent() {
   const location = useLocation();
@@ -18,9 +20,9 @@ export function MainContent() {
       case "/carregamento":
         return <ModuloCarregamento />;
       case "/mapeamento":
-        return <div className="p-6 text-center text-slate-600">Módulo 4: Mapeamento - Em construção</div>;
+        return <ModuloMapeamento />;
       case "/aging":
-        return <div className="p-6 text-center text-slate-600">Módulo 5: Aging - Em construção</div>;
+        return <ModuloAging />;
       case "/correcao":
         return <div className="p-6 text-center text-slate-600">Módulo 6: Correção - Em construção</div>;
       case "/analise":
