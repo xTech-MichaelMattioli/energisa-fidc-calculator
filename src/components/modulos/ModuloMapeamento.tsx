@@ -82,6 +82,7 @@ export function ModuloMapeamento() {
   }, []);
 
   const atualizarMapeamento = (nomeBase: string, campoOriginal: string, novoMapeamento: string) => {
+    const valorMapeamento = novoMapeamento === 'none' ? '' : novoMapeamento;
     setBasesMapeamento(prev => prev.map(base => 
       base.nome === nomeBase 
         ? {
@@ -90,9 +91,9 @@ export function ModuloMapeamento() {
               campo.original === campoOriginal
                 ? {
                     ...campo,
-                    mapeado: novoMapeamento,
-                    tipo: novoMapeamento ? (camposPadrao.find(c => c.nome === novoMapeamento)?.obrigatorio ? 'obrigatorio' : 'opcional') : 'ignorado',
-                    status: novoMapeamento ? 'mapeado' : 'pendente'
+                    mapeado: valorMapeamento,
+                    tipo: valorMapeamento ? (camposPadrao.find(c => c.nome === valorMapeamento)?.obrigatorio ? 'obrigatorio' : 'opcional') : 'ignorado',
+                    status: valorMapeamento ? 'mapeado' : 'pendente'
                   }
                 : campo
             )
@@ -349,14 +350,14 @@ export function ModuloMapeamento() {
                             </div>
                             <div className="flex-1">
                               <Select
-                                value={campo.mapeado}
+                                value={campo.mapeado || 'none'}
                                 onValueChange={(valor) => atualizarMapeamento(base.nome, campo.original, valor)}
                               >
                                 <SelectTrigger className="h-8">
                                   <SelectValue placeholder="Selecione o campo" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                  <SelectItem value="">Não mapear</SelectItem>
+                                  <SelectItem value="none">Não mapear</SelectItem>
                                   {camposPadrao.map((campoPadrao) => (
                                     <SelectItem key={campoPadrao.nome} value={campoPadrao.nome}>
                                       {campoPadrao.nome} {campoPadrao.obrigatorio && '*'}
