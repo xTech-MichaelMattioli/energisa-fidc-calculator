@@ -70,13 +70,25 @@ export function MainContent() {
     };
 
     const handleScroll = (e: WheelEvent) => {
-      if (Math.abs(e.deltaY) > 50 && !isTransitioning) {
-        e.preventDefault();
-        if (e.deltaY > 0) {
-          navigateToNext();
-        } else {
+      const mainContent = document.querySelector('main');
+      if (!mainContent || isTransitioning) return;
+
+      const { scrollTop, scrollHeight, clientHeight } = mainContent;
+      const isAtTop = scrollTop === 0;
+      const isAtBottom = scrollTop + clientHeight >= scrollHeight - 5; // pequena margem
+
+      // Só navega entre páginas se estiver nas bordas E scroll for significativo
+      if (Math.abs(e.deltaY) > 30) {
+        if (isAtTop && e.deltaY < 0) {
+          // No topo scrollando para cima = página anterior
+          e.preventDefault();
           navigateToPrev();
+        } else if (isAtBottom && e.deltaY > 0) {
+          // No final scrollando para baixo = próxima página
+          e.preventDefault();
+          navigateToNext();
         }
+        // No meio da página, deixa o scroll normal funcionar
       }
     };
 
