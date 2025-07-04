@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { ModuloConfiguracoes } from "@/components/modulos/ModuloConfiguracoes";
 import { ModuloParametros } from "@/components/modulos/ModuloParametros";
+import { ModuloCarregamento } from "@/components/modulos/ModuloCarregamento";
 
 export function MainContent() {
   const location = useLocation();
@@ -15,7 +16,7 @@ export function MainContent() {
       case "/parametros":
         return <ModuloParametros />;
       case "/carregamento":
-        return <div className="p-6 text-center text-slate-600">Módulo 3: Carregamento - Em construção</div>;
+        return <ModuloCarregamento />;
       case "/mapeamento":
         return <div className="p-6 text-center text-slate-600">Módulo 4: Mapeamento - Em construção</div>;
       case "/aging":
