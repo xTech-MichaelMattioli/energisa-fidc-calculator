@@ -228,15 +228,15 @@ export function ModuloConfiguracoes() {
               <div className="mt-2">
                 {bibliotecasCarregadas.map((lib, index) => (
                   <div key={lib} className="text-cyan-400">
-                    >>> import {lib} ✓
+                    {`>>> import ${lib} ✓`}
                   </div>
                 ))}
               </div>
               {configurado && (
                 <div className="mt-2 text-yellow-400">
-                  >>> Configurações aplicadas com sucesso!
+                  {`>>> Configurações aplicadas com sucesso!`}
                   <br />
-                  >>> Sistema pronto para processamento das bases ESS e Voltz
+                  {`>>> Sistema pronto para processamento das bases ESS e Voltz`}
                 </div>
               )}
             </div>
