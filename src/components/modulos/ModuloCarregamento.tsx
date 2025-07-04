@@ -232,7 +232,7 @@ export function ModuloCarregamento() {
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold text-slate-800 flex items-center justify-center gap-3">
           <Database className="h-8 w-8 text-cyan-600" />
-          Módulo 3-4: Carregamento e Mapeamento
+          Módulo 2: Carregamento e Mapeamento
         </h1>
         <p className="text-lg text-slate-600">
           Upload, análise e mapeamento automático de bases de dados
