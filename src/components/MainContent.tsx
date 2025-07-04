@@ -55,7 +55,7 @@ export function MainContent() {
     }
   };
 
-  // Mouse and scroll navigation
+  // Mouse and navigation controls
   useEffect(() => {
     let mouseTimeout: NodeJS.Timeout;
     
@@ -66,29 +66,19 @@ export function MainContent() {
       clearTimeout(mouseTimeout);
       mouseTimeout = setTimeout(() => {
         setShowControls(false);
-      }, 2000);
+      }, 3000);
     };
 
+    // Navegação apenas com Ctrl + Scroll para não interferir no scroll normal
     const handleScroll = (e: WheelEvent) => {
-      const mainContent = document.querySelector('main');
-      if (!mainContent || isTransitioning) return;
-
-      const { scrollTop, scrollHeight, clientHeight } = mainContent;
-      const isAtTop = scrollTop === 0;
-      const isAtBottom = scrollTop + clientHeight >= scrollHeight - 5; // pequena margem
-
-      // Só navega entre páginas se estiver nas bordas E scroll for significativo
-      if (Math.abs(e.deltaY) > 30) {
-        if (isAtTop && e.deltaY < 0) {
-          // No topo scrollando para cima = página anterior
-          e.preventDefault();
-          navigateToPrev();
-        } else if (isAtBottom && e.deltaY > 0) {
-          // No final scrollando para baixo = próxima página
-          e.preventDefault();
+      // Só navega se Ctrl estiver pressionado
+      if (e.ctrlKey && Math.abs(e.deltaY) > 20 && !isTransitioning) {
+        e.preventDefault();
+        if (e.deltaY > 0) {
           navigateToNext();
+        } else {
+          navigateToPrev();
         }
-        // No meio da página, deixa o scroll normal funcionar
       }
     };
 
@@ -214,19 +204,18 @@ export function MainContent() {
         </div>
       </header>
       
-      {/* Invisible navigation zones */}
+      {/* Navigation zones - maiores e mais acessíveis */}
       {canGoPrev && (
         <div
           onClick={navigateToPrev}
-          className="absolute left-0 top-16 bottom-0 w-16 z-10 cursor-pointer group/nav"
-          style={{ background: 'transparent' }}
+          className="absolute left-0 top-16 bottom-0 w-20 z-10 cursor-pointer group/nav hover:bg-black/5 transition-colors"
         >
-          <div className={`absolute left-2 top-1/2 -translate-y-1/2 bg-black/80 text-white rounded-full p-2 transition-all duration-300 ${
-            showControls && mouseY > 100 && mouseY < window.innerHeight - 100 
-              ? 'opacity-80 scale-100' 
-              : 'opacity-0 scale-90 pointer-events-none'
+          <div className={`absolute left-3 top-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 text-white rounded-full p-3 transition-all duration-300 ${
+            showControls 
+              ? 'opacity-90 scale-100' 
+              : 'opacity-50 scale-90'
           }`}>
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronLeft className="h-5 w-5" />
           </div>
         </div>
       )}
@@ -234,15 +223,14 @@ export function MainContent() {
       {canGoNext && (
         <div
           onClick={navigateToNext}
-          className="absolute right-0 top-16 bottom-0 w-16 z-10 cursor-pointer group/nav"
-          style={{ background: 'transparent' }}
+          className="absolute right-0 top-16 bottom-0 w-20 z-10 cursor-pointer group/nav hover:bg-black/5 transition-colors"
         >
-          <div className={`absolute right-2 top-1/2 -translate-y-1/2 bg-black/80 text-white rounded-full p-2 transition-all duration-300 ${
-            showControls && mouseY > 100 && mouseY < window.innerHeight - 100 
-              ? 'opacity-80 scale-100' 
-              : 'opacity-0 scale-90 pointer-events-none'
+          <div className={`absolute right-3 top-1/2 -translate-y-1/2 bg-black/70 hover:bg-black/90 text-white rounded-full p-3 transition-all duration-300 ${
+            showControls 
+              ? 'opacity-90 scale-100' 
+              : 'opacity-50 scale-90'
           }`}>
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="h-5 w-5" />
           </div>
         </div>
       )}
@@ -262,7 +250,7 @@ export function MainContent() {
           : 'opacity-0 translate-y-2 pointer-events-none'
       }`}>
         <div className="bg-black/90 text-white text-xs px-4 py-2 rounded-full backdrop-blur-sm">
-          Use scroll, setas ou clique nos indicadores para navegar
+          Use Ctrl + scroll, setas ou clique nos indicadores para navegar
         </div>
       </div>
       
