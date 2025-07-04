@@ -201,7 +201,7 @@ export function ModuloAging() {
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold text-slate-800 flex items-center justify-center gap-3">
           <Calculator className="h-8 w-8 text-cyan-600" />
-          Módulo 5: Cálculo de Aging
+          Módulo 1: Cálculo de Aging
         </h1>
         <p className="text-lg text-slate-600">
           Análise de aging por faixas de vencimento das bases mapeadas

@@ -1,8 +1,6 @@
 
 import { useLocation, useNavigate } from "react-router-dom";
 import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
-import { ModuloParametros } from "@/components/modulos/ModuloParametros";
-import { ModuloCarregamento } from "@/components/modulos/ModuloCarregamento";
 import { ModuloAging } from "@/components/modulos/ModuloAging";
 import { ModuloCorrecao } from "@/components/modulos/ModuloCorrecao";
 import { ModuloAnalise } from "@/components/modulos/ModuloAnalise";
@@ -22,9 +20,7 @@ export function MainContent() {
   const [showRightArrow, setShowRightArrow] = useState(false);
 
   const routes = [
-    { path: "/", name: "Setup" },
-    { path: "/carregamento", name: "Carregamento & Mapeamento" },
-    { path: "/aging", name: "Aging" },
+    { path: "/", name: "Aging" },
     { path: "/correcao", name: "Correção" },
     { path: "/analise", name: "Análise" },
     { path: "/exportacao", name: "Exportação" }
@@ -151,10 +147,6 @@ export function MainContent() {
   const renderModule = () => {
     switch (currentPath) {
       case "/":
-        return <ModuloParametros />;
-      case "/carregamento":
-        return <ModuloCarregamento />;
-      case "/aging":
         return <ModuloAging />;
       case "/correcao":
         return <ModuloCorrecao />;
@@ -163,7 +155,7 @@ export function MainContent() {
       case "/exportacao":
         return <ModuloExportacao />;
       default:
-        return <ModuloParametros />;
+        return <ModuloAging />;
     }
   };
 

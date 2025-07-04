@@ -80,7 +80,7 @@ export function ModuloAnalise() {
           <PieChart className="h-6 w-6 text-white" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">Módulo 7: Análise</h1>
+          <h1 className="text-2xl font-bold text-slate-800">Módulo 3: Análise</h1>
           <p className="text-slate-600">Análise detalhada dos resultados da correção</p>
         </div>
       </div>

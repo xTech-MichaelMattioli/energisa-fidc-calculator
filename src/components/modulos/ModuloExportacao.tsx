@@ -121,18 +121,52 @@ export function ModuloExportacao() {
           <Download className="h-6 w-6 text-white" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">Módulo 8: Exportação</h1>
+          <h1 className="text-2xl font-bold text-slate-800">Módulo 4: Exportação</h1>
           <p className="text-slate-600">Exportação dos resultados processados</p>
         </div>
       </div>
 
       <Tabs defaultValue="resumo" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-5">
+          <TabsTrigger value="setup">Setup</TabsTrigger>
           <TabsTrigger value="resumo">Resumo</TabsTrigger>
           <TabsTrigger value="formatos">Formatos</TabsTrigger>
           <TabsTrigger value="configuracao">Configuração</TabsTrigger>
           <TabsTrigger value="exportar">Exportar</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="setup" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Settings className="h-5 w-5 text-indigo-600" />
+                Configurações do Sistema
+              </CardTitle>
+              <CardDescription>
+                Parâmetros transferidos dos módulos anteriores
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <Label className="text-sm font-medium">Nome do Projeto</Label>
+                <Input defaultValue="FIDC - Energisa Data Refactor" className="mt-1" />
+              </div>
+              
+              <div>
+                <Label className="text-sm font-medium">Período de Referência</Label>
+                <div className="grid grid-cols-2 gap-2 mt-1">
+                  <Input type="date" />
+                  <Input type="date" />
+                </div>
+              </div>
+              
+              <div>
+                <Label className="text-sm font-medium">Responsável</Label>
+                <Input placeholder="Nome do responsável" className="mt-1" />
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         <TabsContent value="resumo" className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
