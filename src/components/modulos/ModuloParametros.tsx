@@ -29,20 +29,9 @@ const indicesIGPM = {
 export function ModuloParametros() {
   const [taxaMulta, setTaxaMulta] = useState(2.0);
   const [taxaJuros, setTaxaJuros] = useState(1.0);
-  const [dataBaseESS] = useState(new Date(2025, 3, 30)); // 30/04/2025
-  const [dataBaseVoltz] = useState(new Date(2025, 1, 20)); // 20/02/2025
   const [parametrosExibidos, setParametrosExibidos] = useState(false);
   const [buscaData, setBuscaData] = useState("");
   const [resultadoBusca, setResultadoBusca] = useState<number | null>(null);
-
-  const formatarData = (data: Date) => {
-    return data.toLocaleDateString('pt-BR');
-  };
-
-  const calcularDiferencaDias = () => {
-    const diffTime = Math.abs(dataBaseESS.getTime() - dataBaseVoltz.getTime());
-    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  };
 
   const buscarIndiceIGPM = (periodo: string) => {
     return indicesIGPM[periodo as keyof typeof indicesIGPM] || 624.40;
@@ -185,50 +174,6 @@ export function ModuloParametros() {
         </Card>
       </div>
 
-      {/* Datas de Referência das Bases */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <span className="text-2xl">📅</span>
-            Datas de Referência das Bases
-          </CardTitle>
-          <CardDescription>
-            Datas base utilizadas para cálculo de aging e correção monetária
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="text-center p-4 bg-green-50 rounded-lg border border-green-200">
-              <Calendar className="h-8 w-8 text-green-600 mx-auto mb-2" />
-              <h3 className="font-semibold text-green-700 mb-1">Base ESS</h3>
-              <p className="text-lg font-bold text-green-800">{formatarData(dataBaseESS)}</p>
-              <code className="text-xs text-green-600 bg-green-100 px-2 py-1 rounded mt-1 inline-block">
-                datetime(2025, 4, 30)
-              </code>
-            </div>
-            <div className="text-center p-4 bg-purple-50 rounded-lg border border-purple-200">
-              <Calendar className="h-8 w-8 text-purple-600 mx-auto mb-2" />
-              <h3 className="font-semibold text-purple-700 mb-1">Base Voltz</h3>
-              <p className="text-lg font-bold text-purple-800">{formatarData(dataBaseVoltz)}</p>
-              <code className="text-xs text-purple-600 bg-purple-100 px-2 py-1 rounded mt-1 inline-block">
-                datetime(2025, 2, 20)
-              </code>
-            </div>
-          </div>
-          <div className="mt-6 text-center">
-            <div className="flex items-center justify-center gap-4 p-4 bg-slate-50 rounded-lg">
-              <Target className="h-6 w-6 text-slate-600" />
-              <span className="text-lg font-medium text-slate-700">
-                Diferença entre bases: <strong>{calcularDiferencaDias()} dias</strong>
-              </span>
-            </div>
-            <p className="text-sm text-slate-600 mt-2">
-              Esta diferença impacta os cálculos de aging e deve ser considerada na análise
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Índices IGPM */}
       <Card>
         <CardHeader>
@@ -341,7 +286,7 @@ export function ModuloParametros() {
         </div>
       )}
 
-      {/* Output dos Parâmetros - Replicando exatamente o notebook */}
+      {/* Output dos Parâmetros */}
       {parametrosExibidos && (
         <Card className="border-green-200 bg-green-50">
           <CardContent className="p-6">
@@ -352,8 +297,6 @@ export function ModuloParametros() {
               </div>
               <div>⚖️  Taxa de multa: {taxaMulta.toFixed(1)}%</div>
               <div>📈 Taxa de juros mensal: {taxaJuros.toFixed(1)}%</div>
-              <div>📅 Data base ESS: {formatarData(dataBaseESS)}</div>
-              <div>📅 Data base Voltz: {formatarData(dataBaseVoltz)}</div>
               <div>📊 Índices IGPM: {Object.keys(indicesIGPM).length} períodos disponíveis</div>
             </div>
           </CardContent>
