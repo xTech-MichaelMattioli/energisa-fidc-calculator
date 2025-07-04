@@ -26,22 +26,10 @@ import {
 
 const modules = [
   { 
-    title: "Configurações", 
-    url: "/", 
-    icon: Settings, 
-    description: "Importações e configuração inicial" 
-  },
-  { 
-    title: "Parâmetros", 
-    url: "/parametros", 
-    icon: Settings, 
-    description: "Parâmetros de correção financeira" 
-  },
-  { 
     title: "Carregamento", 
-    url: "/carregamento", 
+    url: "/", 
     icon: Database, 
-    description: "Análise das bases ESS e Voltz" 
+    description: "Upload e análise das bases ESS e Voltz" 
   },
   { 
     title: "Mapeamento", 

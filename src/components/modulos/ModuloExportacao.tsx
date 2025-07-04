@@ -121,7 +121,7 @@ export function ModuloExportacao() {
           <Download className="h-6 w-6 text-white" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">Módulo 4: Exportação</h1>
+          <h1 className="text-2xl font-bold text-slate-800">Módulo 6: Exportação</h1>
           <p className="text-slate-600">Exportação dos resultados processados</p>
         </div>
       </div>
