@@ -17,6 +17,8 @@ export function MainContent() {
   const navigate = useNavigate();
   const currentPath = location.pathname;
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [showControls, setShowControls] = useState(false);
+  const [mouseY, setMouseY] = useState(0);
 
   const routes = [
     { path: "/", name: "Configurações" },
@@ -52,6 +54,41 @@ export function MainContent() {
       }, 150);
     }
   };
+
+  // Mouse and scroll navigation
+  useEffect(() => {
+    let mouseTimeout: NodeJS.Timeout;
+    
+    const handleMouseMove = (e: MouseEvent) => {
+      setMouseY(e.clientY);
+      setShowControls(true);
+      
+      clearTimeout(mouseTimeout);
+      mouseTimeout = setTimeout(() => {
+        setShowControls(false);
+      }, 2000);
+    };
+
+    const handleScroll = (e: WheelEvent) => {
+      if (Math.abs(e.deltaY) > 50 && !isTransitioning) {
+        e.preventDefault();
+        if (e.deltaY > 0) {
+          navigateToNext();
+        } else {
+          navigateToPrev();
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('wheel', handleScroll, { passive: false });
+    
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('wheel', handleScroll);
+      clearTimeout(mouseTimeout);
+    };
+  }, [currentIndex, isTransitioning]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -124,59 +161,105 @@ export function MainContent() {
   };
 
   return (
-    <SidebarInset className="flex-1 relative group">
-      <header className="flex h-16 items-center gap-2 border-b border-slate-200 bg-white px-6 shadow-sm">
+    <SidebarInset className="flex-1 relative overflow-hidden">
+      <header className="flex h-16 items-center gap-2 border-b border-slate-200 bg-white px-6 shadow-sm relative z-20">
         <SidebarTrigger className="-ml-1" />
         <div className="flex items-center gap-2 text-sm text-slate-600">
           <span>FIDC - Energisa Data Refactor Wizard</span>
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          <div className="text-xs text-slate-500">
-            {currentIndex + 1} / {routes.length} - {routes[currentIndex]?.name}
+        
+        {/* Floating progress indicator */}
+        <div className={`ml-auto flex items-center gap-3 transition-all duration-500 ${
+          showControls ? 'opacity-100 translate-y-0' : 'opacity-40 translate-y-1'
+        }`}>
+          <div className="text-xs text-slate-500 font-medium">
+            {routes[currentIndex]?.name}
           </div>
-          <div className="flex gap-1">
-            {routes.map((_, i) => (
-              <div
+          <div className="flex gap-1.5">
+            {routes.map((route, i) => (
+              <button
                 key={i}
-                className={`w-2 h-2 rounded-full transition-colors ${
-                  i === currentIndex ? 'bg-indigo-600' : 'bg-slate-300'
+                onClick={() => {
+                  if (!isTransitioning && i !== currentIndex) {
+                    setIsTransitioning(true);
+                    setTimeout(() => {
+                      navigate(route.path);
+                      setTimeout(() => setIsTransitioning(false), 300);
+                    }, 150);
+                  }
+                }}
+                className={`w-1.5 h-1.5 rounded-full transition-all duration-300 cursor-pointer ${
+                  i === currentIndex 
+                    ? 'bg-indigo-600 scale-125 shadow-sm' 
+                    : i < currentIndex 
+                      ? 'bg-indigo-400 hover:bg-indigo-500' 
+                      : 'bg-slate-300 hover:bg-slate-400'
                 }`}
+                title={route.name}
               />
             ))}
           </div>
         </div>
       </header>
       
-      {/* Navigation arrows */}
+      {/* Invisible navigation zones */}
       {canGoPrev && (
-        <button
+        <div
           onClick={navigateToPrev}
-          className="absolute left-4 top-1/2 -translate-y-1/2 z-10 bg-white/90 hover:bg-white shadow-lg rounded-full p-3 opacity-0 group-hover:opacity-100 transition-all duration-300 hover:scale-110"
-          disabled={isTransitioning}
+          className="absolute left-0 top-16 bottom-0 w-16 z-10 cursor-pointer group/nav"
+          style={{ background: 'transparent' }}
         >
-          <ChevronLeft className="h-6 w-6 text-slate-600" />
-        </button>
+          <div className={`absolute left-2 top-1/2 -translate-y-1/2 bg-black/80 text-white rounded-full p-2 transition-all duration-300 ${
+            showControls && mouseY > 100 && mouseY < window.innerHeight - 100 
+              ? 'opacity-80 scale-100' 
+              : 'opacity-0 scale-90 pointer-events-none'
+          }`}>
+            <ChevronLeft className="h-4 w-4" />
+          </div>
+        </div>
       )}
       
       {canGoNext && (
-        <button
+        <div
           onClick={navigateToNext}
-          className="absolute right-4 top-1/2 -translate-y-1/2 z-10 bg-white/90 hover:bg-white shadow-lg rounded-full p-3 opacity-0 group-hover:opacity-100 transition-all duration-300 hover:scale-110"
-          disabled={isTransitioning}
+          className="absolute right-0 top-16 bottom-0 w-16 z-10 cursor-pointer group/nav"
+          style={{ background: 'transparent' }}
         >
-          <ChevronRight className="h-6 w-6 text-slate-600" />
-        </button>
+          <div className={`absolute right-2 top-1/2 -translate-y-1/2 bg-black/80 text-white rounded-full p-2 transition-all duration-300 ${
+            showControls && mouseY > 100 && mouseY < window.innerHeight - 100 
+              ? 'opacity-80 scale-100' 
+              : 'opacity-0 scale-90 pointer-events-none'
+          }`}>
+            <ChevronRight className="h-4 w-4" />
+          </div>
+        </div>
       )}
       
-      <main className={`flex-1 overflow-auto transition-all duration-300 ${
-        isTransitioning ? 'opacity-0 transform scale-95' : 'opacity-100 transform scale-100'
+      <main className={`flex-1 overflow-auto transition-all duration-500 ease-out ${
+        isTransitioning 
+          ? 'opacity-0 transform translate-x-4 scale-98' 
+          : 'opacity-100 transform translate-x-0 scale-100'
       }`}>
         {renderModule()}
       </main>
 
-      {/* Instructions */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-slate-400 bg-white/80 px-3 py-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-        Use ← → ou swipe para navegar • Espaço para avançar
+      {/* Floating help text */}
+      <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-30 transition-all duration-700 ${
+        showControls && currentIndex === 0
+          ? 'opacity-100 translate-y-0' 
+          : 'opacity-0 translate-y-2 pointer-events-none'
+      }`}>
+        <div className="bg-black/90 text-white text-xs px-4 py-2 rounded-full backdrop-blur-sm">
+          Use scroll, setas ou clique nos indicadores para navegar
+        </div>
+      </div>
+      
+      {/* Progress bar at bottom */}
+      <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-slate-200">
+        <div 
+          className="h-full bg-gradient-to-r from-indigo-500 to-indigo-600 transition-all duration-700 ease-out"
+          style={{ width: `${((currentIndex + 1) / routes.length) * 100}%` }}
+        />
       </div>
     </SidebarInset>
   );
