@@ -4,7 +4,6 @@ import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { ModuloConfiguracoes } from "@/components/modulos/ModuloConfiguracoes";
 import { ModuloParametros } from "@/components/modulos/ModuloParametros";
 import { ModuloCarregamento } from "@/components/modulos/ModuloCarregamento";
-import { ModuloMapeamento } from "@/components/modulos/ModuloMapeamento";
 import { ModuloAging } from "@/components/modulos/ModuloAging";
 import { ModuloCorrecao } from "@/components/modulos/ModuloCorrecao";
 import { ModuloAnalise } from "@/components/modulos/ModuloAnalise";
@@ -26,8 +25,7 @@ export function MainContent() {
   const routes = [
     { path: "/", name: "Configurações" },
     { path: "/parametros", name: "Parâmetros" },
-    { path: "/carregamento", name: "Carregamento" },
-    { path: "/mapeamento", name: "Mapeamento" },
+    { path: "/carregamento", name: "Carregamento & Mapeamento" },
     { path: "/aging", name: "Aging" },
     { path: "/correcao", name: "Correção" },
     { path: "/analise", name: "Análise" },
@@ -160,8 +158,6 @@ export function MainContent() {
         return <ModuloParametros />;
       case "/carregamento":
         return <ModuloCarregamento />;
-      case "/mapeamento":
-        return <ModuloMapeamento />;
       case "/aging":
         return <ModuloAging />;
       case "/correcao":
