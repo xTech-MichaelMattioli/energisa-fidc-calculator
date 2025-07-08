@@ -1,22 +1,115 @@
-# Welcome to your Lovable project
+# ENERGISA FIDC Calculator
 
-## Project info
+Sistema de cálculo de valor corrigido para análise de carteiras FIDC das distribuidoras de energia elétrica Energisa.
 
-**URL**: https://lovable.dev/projects/8d2a900c-2737-4027-9da0-656c68928dd3
+## 🎯 Objetivo
 
-## How can I edit this code?
+Interface web moderna para processamento e análise das bases de dados ESS e Voltz, permitindo:
+- Carregamento automatizado das bases de dados
+- Mapeamento inteligente de campos
+- Cálculo de aging por faixas de vencimento
+- Correção monetária por diferentes índices
+- Análise detalhada dos resultados
+- Exportação dos dados processados
 
-There are several ways of editing your application.
+## 🏗️ Arquitetura
 
-**Use Lovable**
+### Frontend (React + TypeScript)
+- **Framework**: Vite + React 18
+- **UI Components**: Shadcn/UI + Tailwind CSS
+- **Roteamento**: React Router
+- **Estado**: Context API + Hooks
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/8d2a900c-2737-4027-9da0-656c68928dd3) and start prompting.
+### Backend (Python)
+- **Script de processamento**: `scripts/processar_bases.py`
+- **Bibliotecas**: pandas, numpy, openpyxl
+- **Baseado no notebook**: `FIDC_Calculo_Valor_Corrigido_CORRIGIDO.ipynb`
 
-Changes made via Lovable will be committed automatically to this repo.
+## 📊 Módulos do Sistema
 
-**Use your preferred IDE**
+### 1. Módulo Carregamento
+- Upload manual de arquivos CSV/Excel
+- **Carregamento automático das bases Energisa**
+- Validação de estrutura dos dados
+- Preview dos dados carregados
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+### 2. Módulo Mapeamento
+- Mapeamento automático de campos
+- Configuração manual de correspondências
+- Validação de campos obrigatórios
+
+### 3. Módulo Aging
+- Cálculo de dias em atraso
+- Distribuição por faixas etárias
+- Análise de inadimplência
+
+### 4. Módulo Correção
+- Correção monetária (IPCA, Selic, CDI, INPC)
+- Cálculo de juros e multa
+- Valor corrigido final
+
+### 5. Módulo Análise
+- Dashboards interativos
+- Gráficos de distribuição
+- Métricas consolidadas
+
+### 6. Módulo Exportação
+- Exportação para Excel
+- Relatórios personalizados
+- Histórico de processamentos
+
+## 🗂️ Bases de Dados
+
+### Base ESS (Energisa Sergipe)
+- **Arquivo**: `BASE DADOS/1 - Distribuidoras/1. ESS_BRUTA_30.04.xlsx`
+- **Registros**: ~45.320
+- **Campos principais**: CD_CLIENTE, VL_FATURA_ORIGINAL, DT_VENCIMENTO
+
+### Base Voltz
+- **Arquivo**: `BASE DADOS/0- Voltz/Voltz_Base_FIDC_20022025.xlsx`
+- **Registros**: ~38.745  
+- **Campos principais**: CODIGO_CLIENTE, VALOR_DEBITO, DATA_VENCIMENTO
+
+## 🚀 Como Executar
+
+### Método 1: Script Automático
+```bash
+# Execute o arquivo start.bat
+./start.bat
+```
+
+### Método 2: Manual
+```bash
+# Instalar dependências
+npm install
+
+# Iniciar servidor de desenvolvimento
+npm run dev
+```
+
+## 📈 Fluxo de Trabalho
+
+1. **Carregar Bases** → Módulo 1 (Carregamento)
+2. **Mapear Campos** → Módulo 2 (Mapeamento)  
+3. **Calcular Aging** → Módulo 3 (Aging)
+4. **Aplicar Correção** → Módulo 4 (Correção)
+5. **Analisar Resultados** → Módulo 5 (Análise)
+6. **Exportar Dados** → Módulo 6 (Exportação)
+
+## 🔧 Tecnologias
+
+- **React 18** + TypeScript
+- **Vite** (build tool)
+- **Tailwind CSS** (estilização)
+- **Shadcn/UI** (componentes)
+- **Lucide React** (ícones)
+- **React Router** (navegação)
+- **Python 3.x** (processamento)
+- **Pandas** (manipulação de dados)
+
+## 📝 Integração com Notebook
+
+O sistema web implementa a mesma lógica do notebook `FIDC_Calculo_Valor_Corrigido_CORRIGIDO.ipynb` com dados reais das bases ESS e Voltz.
 
 The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
 

@@ -15,6 +15,7 @@ import {
   Target,
   X
 } from "lucide-react";
+import DataService, { ArquivoBase } from "@/services/dataService";
 
 interface ArquivoCarregado {
   nome: string;
@@ -26,15 +27,65 @@ interface ArquivoCarregado {
   preview?: any[];
   erro?: string;
   progresso?: number;
+  base?: ArquivoBase;
 }
 
 export function ModuloCarregamento() {
   const [arquivos, setArquivos] = useState<ArquivoCarregado[]>([]);
   const [processandoArquivo, setProcessandoArquivo] = useState<string | null>(null);
   const [abaAtiva, setAbaAtiva] = useState("upload");
+  const [carregandoBasesReais, setCarregandoBasesReais] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dataService = DataService.getInstance();
 
-  const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+  const carregarBasesEnergia = async () => {
+    setCarregandoBasesReais(true);
+    
+    try {
+      // Carregar base ESS
+      const baseESS = await dataService.carregarBaseESS();
+      const arquivoESS: ArquivoCarregado = {
+        nome: baseESS.nome,
+        tamanho: baseESS.tamanho,
+        tipo: baseESS.tipo,
+        status: 'mapeado',
+        registros: baseESS.registros,
+        colunas: baseESS.colunas,
+        preview: baseESS.preview,
+        progresso: 100,
+        base: baseESS
+      };
+
+      setArquivos(prev => [...prev, arquivoESS]);
+
+      // Pequena pausa para UX
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Carregar base Voltz
+      const baseVoltz = await dataService.carregarBaseVoltz();
+      const arquivoVoltz: ArquivoCarregado = {
+        nome: baseVoltz.nome,
+        tamanho: baseVoltz.tamanho,
+        tipo: baseVoltz.tipo,
+        status: 'mapeado',
+        registros: baseVoltz.registros,
+        colunas: baseVoltz.colunas,
+        preview: baseVoltz.preview,
+        progresso: 100,
+        base: baseVoltz
+      };
+
+      setArquivos(prev => [...prev, arquivoVoltz]);
+      setAbaAtiva("analise");
+
+    } catch (error) {
+      console.error('Erro ao carregar bases:', error);
+    } finally {
+      setCarregandoBasesReais(false);
+    }
+  };
+
+  const handleFileUpload = useCallback((event: any) => {
     const files = Array.from(event.target.files || []);
     
     files.forEach(file => {
@@ -159,9 +210,10 @@ export function ModuloCarregamento() {
       </div>
 
       <Tabs value={abaAtiva} onValueChange={setAbaAtiva} className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
+        <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="upload">Upload de Arquivos</TabsTrigger>
-          <TabsTrigger value="preview">Preview dos Dados</TabsTrigger>
+          <TabsTrigger value="bases-reais">Bases Energisa</TabsTrigger>
+          <TabsTrigger value="analise">Análise dos Dados</TabsTrigger>
         </TabsList>
         
         {/* Aba de Upload */}
@@ -284,8 +336,88 @@ export function ModuloCarregamento() {
           )}
         </TabsContent>
 
-        {/* Aba de Preview */}
-        <TabsContent value="preview" className="space-y-6">
+        {/* Aba Bases Reais */}
+        <TabsContent value="bases-reais" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5 text-green-600" />
+                Bases de Dados Energisa
+              </CardTitle>
+              <CardDescription>
+                Carregue as bases ESS e Voltz já disponíveis no projeto
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="text-center space-y-6">
+                <div className="bg-gradient-to-br from-green-50 to-blue-50 rounded-lg p-8">
+                  <div className="mx-auto w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+                    <Database className="h-8 w-8 text-green-600" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-slate-800 mb-2">
+                    Bases de Dados Pré-configuradas
+                  </h3>
+                  <p className="text-slate-600 mb-6 max-w-md mx-auto">
+                    Carregue automaticamente as bases ESS e Voltz já estruturadas para análise FIDC.
+                  </p>
+                  
+                  <div className="grid md:grid-cols-2 gap-4 mb-6">
+                    <div className="bg-white rounded-lg p-4 border border-green-200">
+                      <h4 className="font-medium text-slate-800 mb-2">Base ESS</h4>
+                      <p className="text-sm text-slate-600 mb-2">ESS_BRUTA_30.04.xlsx</p>
+                      <p className="text-xs text-slate-500">~45.320 registros</p>
+                    </div>
+                    <div className="bg-white rounded-lg p-4 border border-blue-200">
+                      <h4 className="font-medium text-slate-800 mb-2">Base Voltz</h4>
+                      <p className="text-sm text-slate-600 mb-2">Voltz_Base_FIDC_20022025.xlsx</p>
+                      <p className="text-xs text-slate-500">~38.745 registros</p>
+                    </div>
+                  </div>
+
+                  <Button
+                    onClick={carregarBasesEnergia}
+                    disabled={carregandoBasesReais}
+                    className="bg-gradient-to-r from-green-500 to-blue-500 text-white px-8 py-3 text-lg"
+                  >
+                    {carregandoBasesReais ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                        Carregando Bases...
+                      </>
+                    ) : (
+                      <>
+                        <Database className="h-5 w-5 mr-2" />
+                        Carregar Bases Energisa
+                      </>
+                    )}
+                  </Button>
+                </div>
+
+                {arquivos.length > 0 && (
+                  <div className="border rounded-lg p-4 bg-slate-50">
+                    <h4 className="font-medium text-slate-800 mb-3">Bases Carregadas:</h4>
+                    <div className="space-y-2">
+                      {arquivos.map((arquivo) => (
+                        <div key={arquivo.nome} className="flex items-center justify-between text-sm">
+                          <span className="font-medium">{arquivo.nome}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-600">
+                              {arquivo.registros?.toLocaleString('pt-BR')} registros
+                            </span>
+                            <CheckCircle className="h-4 w-4 text-green-600" />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Aba de Análise */}
+        <TabsContent value="analise" className="space-y-6">
           {arquivos.filter(arq => arq.status === 'mapeado').length > 0 ? (
             <div className="space-y-6">
               {arquivos.filter(arq => arq.status === 'mapeado').map((arquivo) => (

@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+
+.venv
+*.ipynb
+*.xlsx
+/BASE_DADOS/
+/DOCS/

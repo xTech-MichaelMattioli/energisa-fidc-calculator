@@ -19,6 +19,7 @@ import {
   Play,
   Clock
 } from "lucide-react";
+import DataService from "@/services/dataService";
 
 interface FaixaAging {
   nome: string;
