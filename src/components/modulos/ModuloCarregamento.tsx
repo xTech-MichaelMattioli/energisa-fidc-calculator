@@ -238,14 +238,33 @@ export function ModuloCarregamento() {
     ));
 
     try {
-      // Progresso inicial
+      // Progresso inicial - Upload para Supabase Storage
       setArquivos(prev => prev.map(arq => 
         arq.nome === file.name 
-          ? { ...arq, progresso: 20 }
+          ? { ...arq, progresso: 10 }
           : arq
       ));
 
+      // 1. Fazer upload do arquivo para o Supabase Storage
+      console.log('📤 Fazendo upload para Supabase Storage:', file.name);
+      const uploadResult = await supabaseExcelService.uploadFile(file);
+      
+      if (!uploadResult.success) {
+        throw new Error(`Erro no upload: ${uploadResult.error}`);
+      }
+      
+      console.log('✅ Upload concluído:', uploadResult.fileUrl);
+      
+      // Progresso após upload
+      setArquivos(prev => prev.map(arq => 
+        arq.nome === file.name 
+          ? { ...arq, progresso: 30 }
+          : arq
+      ));
+
+      // 2. Processar arquivo localmente para obter dados
       if (file.name.toLowerCase().endsWith('.csv')) {
+        // Processar CSV
         // Processar CSV
         const texto = await file.text();
         console.log('Conteúdo do arquivo CSV (primeiros 500 chars):', texto.substring(0, 500));
@@ -282,7 +301,7 @@ export function ModuloCarregamento() {
           // Progresso de leitura
           setArquivos(prev => prev.map(arq => 
             arq.nome === file.name 
-              ? { ...arq, progresso: 40 }
+              ? { ...arq, progresso: 50 }
               : arq
           ));
           
@@ -307,12 +326,12 @@ export function ModuloCarregamento() {
           console.log('Amostra dos primeiros 3 registros:', dados.slice(0, 3));
         }
       } else {
-        // Processar Excel - tentar Edge Function primeiro
+        // Processar Excel - já foi feito upload, agora tentar Edge Function primeiro
         console.log('Processando arquivo Excel:', file.name);
         
         setArquivos(prev => prev.map(arq => 
           arq.nome === file.name 
-            ? { ...arq, progresso: 20 }
+            ? { ...arq, progresso: 40 }
             : arq
         ));
 
@@ -331,7 +350,7 @@ export function ModuloCarregamento() {
               // Atualizar progresso
               setArquivos(prev => prev.map(arq => 
                 arq.nome === file.name 
-                  ? { ...arq, progresso: 70 }
+                  ? { ...arq, progresso: 80 }
                   : arq
               ));
               
@@ -364,7 +383,7 @@ export function ModuloCarregamento() {
           
           setArquivos(prev => prev.map(arq => 
             arq.nome === file.name 
-              ? { ...arq, progresso: 40 }
+              ? { ...arq, progresso: 50 }
               : arq
           ));
 
@@ -403,7 +422,7 @@ export function ModuloCarregamento() {
               // Progresso
               setArquivos(prev => prev.map(arq => 
                 arq.nome === file.name 
-                  ? { ...arq, progresso: 60 }
+                  ? { ...arq, progresso: 70 }
                   : arq
               ));
 
@@ -462,7 +481,7 @@ export function ModuloCarregamento() {
       // Progresso da validação
       setArquivos(prev => prev.map(arq => 
         arq.nome === file.name 
-          ? { ...arq, status: 'validando', progresso: 60 }
+          ? { ...arq, status: 'validando', progresso: 80 }
           : arq
       ));
 
@@ -480,7 +499,7 @@ export function ModuloCarregamento() {
       console.log('Resultado da validação:', validacao);
 
       // Finalizar processamento
-      for (let i = 70; i <= 100; i += 15) {
+      for (let i = 85; i <= 100; i += 5) {
         await new Promise(resolve => setTimeout(resolve, 100));
         
         setArquivos(prev => prev.map(arq => 
@@ -495,6 +514,7 @@ export function ModuloCarregamento() {
       console.log('Colunas identificadas:', colunas);
       console.log('Preview dos dados:', dados.slice(0, 3));
       console.log('Validação FIDC:', validacao);
+      console.log('Arquivo salvo no Supabase Storage:', uploadResult.fileUrl);
 
       // Resultado final com dados reais
       setArquivos(prev => prev.map(arq => 
@@ -549,7 +569,7 @@ export function ModuloCarregamento() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const todosArquivosMapeados = arquivos.length > 0 && arquivos.every(arq => arq.status === 'mapeado');
+  const todosArquivosMapeados = arquivos.length > 0 && arquivos.every(arq => arq.status === 'mapeado' || arq.status === 'validado');
 
   const passarProximoModulo = () => {
     const dadosCarregamento = {
@@ -588,7 +608,7 @@ export function ModuloCarregamento() {
           </CardTitle>
           <CardDescription>
             Faça upload dos arquivos CSV ou Excel das bases ESS e Voltz.
-            O sistema validará automaticamente a estrutura FIDC.
+            Os arquivos são sincronizados automaticamente com o Supabase Storage e validados pela estrutura FIDC.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -673,7 +693,10 @@ export function ModuloCarregamento() {
                       }>
                         {(arquivo.status === 'validado' || arquivo.status === 'mapeado') && <CheckCircle className="h-3 w-3 mr-1" />}
                         {arquivo.status === 'erro' && <AlertTriangle className="h-3 w-3 mr-1" />}
-                        {arquivo.status === 'validando' ? 'Validando FIDC' : arquivo.status}
+                        {arquivo.status === 'validando' ? 'Validando FIDC' : 
+                         arquivo.status === 'validado' ? 'Validado e Sincronizado' :
+                         arquivo.status === 'mapeado' ? 'Processado e Sincronizado' : 
+                         arquivo.status}
                       </Badge>
                       {arquivo.preview && (
                         <Button
@@ -700,7 +723,9 @@ export function ModuloCarregamento() {
                     <div className="space-y-2">
                       <div className="flex justify-between text-sm">
                         <span>
-                          {arquivo.status === 'processando' ? 'Processando arquivo...' : 'Validando estrutura FIDC...'}
+                          {arquivo.status === 'processando' ? 
+                            (arquivo.progresso < 30 ? 'Enviando para Supabase Storage...' : 'Processando arquivo...') 
+                            : 'Validando estrutura FIDC...'}
                         </span>
                         <span>{arquivo.progresso}%</span>
                       </div>
@@ -722,6 +747,7 @@ export function ModuloCarregamento() {
                         <p>• {arquivo.registros?.toLocaleString('pt-BR')} registros encontrados</p>
                         <p>• {arquivo.colunas?.length} colunas identificadas</p>
                         <p>• {Object.values(arquivo.validacao.camposEncontrados).filter(v => v !== null).length}/{camposObrigatorios.length} campos obrigatórios encontrados</p>
+                        <p>• ✅ Arquivo salvo no Supabase Storage</p>
                       </div>
 
                       {arquivo.validacao.camposFaltantes.length > 0 && (
@@ -739,6 +765,7 @@ export function ModuloCarregamento() {
                     <div className="text-sm text-slate-600 space-y-1">
                       <p>• {arquivo.registros?.toLocaleString('pt-BR')} registros encontrados</p>
                       <p>• {arquivo.colunas?.length} colunas identificadas</p>
+                      <p>• ✅ Arquivo salvo no Supabase Storage</p>
                     </div>
                   )}
 
@@ -812,7 +839,7 @@ export function ModuloCarregamento() {
                 Status do Carregamento
               </h3>
               <p className="text-sm text-slate-600">
-                {arquivos.filter(arq => arq.status === 'mapeado').length} de {arquivos.length} arquivo(s) processado(s)
+                {arquivos.filter(arq => arq.status === 'mapeado' || arq.status === 'validado').length} de {arquivos.length} arquivo(s) processado(s)
               </p>
             </div>
             
