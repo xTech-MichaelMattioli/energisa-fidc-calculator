@@ -1,7 +1,7 @@
 
 import { useLocation, useNavigate } from "react-router-dom";
 import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
-import { ModuloCarregamento } from "@/components/modulos/ModuloCarregamento";
+import { ModuloCarregamentoComAbas } from "@/components/modulos/ModuloCarregamentoComAbas";
 import { ModuloMapeamento } from "@/components/modulos/ModuloMapeamento";
 import { ModuloCorrecao } from "@/components/modulos/ModuloCorrecao";
 import { ModuloAnalise } from "@/components/modulos/ModuloAnalise";
@@ -149,7 +149,7 @@ export function MainContent() {
   const renderModule = () => {
     switch (currentPath) {
       case "/":
-        return <ModuloCarregamento />;
+        return <ModuloCarregamentoComAbas />;
       case "/mapeamento":
         return <ModuloMapeamento />;
       case "/correcao":
@@ -159,7 +159,7 @@ export function MainContent() {
       case "/exportacao":
         return <ModuloExportacao />;
       default:
-        return <ModuloCarregamento />;
+        return <ModuloCarregamentoComAbas />;
     }
   };
 
