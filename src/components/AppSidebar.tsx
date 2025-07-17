@@ -5,7 +5,6 @@ import {
   Settings,
   Database,
   BarChart3,
-  Calculator,
   TrendingUp,
   PieChart,
   FileText,
@@ -36,12 +35,6 @@ const modules = [
     url: "/mapeamento", 
     icon: BarChart3, 
     description: "Mapeamento de campos" 
-  },
-  { 
-    title: "Aging", 
-    url: "/aging", 
-    icon: Calculator, 
-    description: "Cálculo de aging por vencimento" 
   },
   { 
     title: "Correção", 
