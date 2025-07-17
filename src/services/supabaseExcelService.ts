@@ -1,26 +1,11 @@
-// Serviço para integração com Edge Function do Supabase
+// Serviço para integração com Supabase Storage
 import { createClient } from '@supabase/supabase-js'
 
-export interface ProcessExcelResult {
-  success: boolean;
-  fileName: string;
-  fileSize: number;
-  totalRecords: number;
-  columns: string[];
-  preview: any[];
-  validation: {
-    camposEncontrados: { [key: string]: string | null };
-    camposFaltantes: string[];
-    score: number;
-    valido: boolean;
-  };
-  metadata: {
-    sheets: string[];
-    processedSheet: string;
-    encoding: string;
-    processingTime: number;
-  };
-  error?: string;
+export interface ValidacaoFIDC {
+  camposEncontrados: { [key: string]: string | null };
+  camposFaltantes: string[];
+  score: number;
+  valido: boolean;
 }
 
 export interface UploadResult {
@@ -29,47 +14,86 @@ export interface UploadResult {
   filePath: string;
   fileUrl: string;
   uploadTime: number;
+  fileSize: number;
   error?: string;
 }
 
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percentage: number;
+}
+
 export class SupabaseExcelService {
-  private readonly edgeFunctionUrl: string;
   private readonly supabase;
-  private readonly supabaseUrl = 'https://tlxrdgamqsgeryzhioly.supabase.co';
-  private readonly supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRseFJkZ2FtcXNnZXJ5emhpb2x5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzc3MjI5MjgsImV4cCI6MjA1MzI5ODkyOH0.vQJHNTZxPPQYIZlH5dKCYHv2_tHJ9uMRV4xLU_kJSTo';
+  private readonly supabaseUrl = 'https://jlvkyasuvvgjdamhnwlb.supabase.co';
+  private readonly supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impsdmt5YXN1dnZnamRhbWhud2xiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI3MzMyOTAsImV4cCI6MjA2ODMwOTI5MH0.CVhdtnlSphfZTJD1qibN_jQnpu6hog1E27f-RrLI8us';
   private readonly storageBucket = 'excel-uploads';
 
   constructor() {
-    // URL da Edge Function do Supabase
-    this.edgeFunctionUrl = 'https://tlxrdgamqsgeryzhioly.supabase.co/functions/v1/process-excel-file';
-    
     // Inicializar cliente Supabase
     this.supabase = createClient(this.supabaseUrl, this.supabaseKey);
   }
 
   /**
-   * Faz upload do arquivo para o Supabase Storage
+   * Faz upload do arquivo para o Supabase Storage com progress tracking
    */
-  async uploadFile(file: File): Promise<UploadResult> {
+  async uploadFile(file: File, userId?: string, onProgress?: (progress: UploadProgress) => void): Promise<UploadResult> {
     try {
       const startTime = Date.now();
-      console.log('📤 Iniciando upload para Supabase Storage:', file.name);
+      console.log('📤 Iniciando upload para Supabase Storage:', {
+        nome: file.name,
+        tamanho: this.formatFileSize(file.size),
+        tipo: file.type
+      });
+      
+      // Validar arquivo antes do upload
+      const validation = this.validateExcelFile(file);
+      if (!validation.valid) {
+        throw new Error(validation.error);
+      }
       
       // Gerar nome único para o arquivo
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const fileName = `${timestamp}_${file.name}`;
-      const filePath = `energisa-uploads/${fileName}`;
+      
+      // Incluir user_id no path se fornecido
+      const userPath = userId ? `${userId}/` : '';
+      const filePath = `energisa-uploads/${userPath}${fileName}`;
+      
+      // Configurar opções de upload otimizadas para arquivos grandes
+      const uploadOptions = {
+        cacheControl: '3600',
+        upsert: false,
+        contentType: file.type || 'application/octet-stream'
+      };
+      
+      // Callback de progresso se fornecido
+      if (onProgress) {
+        onProgress({
+          loaded: 0,
+          total: file.size,
+          percentage: 0
+        });
+      }
       
       // Fazer upload para o bucket
       const { data, error } = await this.supabase.storage
         .from(this.storageBucket)
-        .upload(filePath, file, {
-          cacheControl: '3600',
-          upsert: false
-        });
+        .upload(filePath, file, uploadOptions);
       
       if (error) {
-        throw error;
+        console.error('❌ Erro detalhado do upload:', error);
+        throw new Error(`Erro no upload: ${error.message}`);
+      }
+      
+      // Callback de progresso completo
+      if (onProgress) {
+        onProgress({
+          loaded: file.size,
+          total: file.size,
+          percentage: 100
+        });
       }
       
       // Obter URL pública do arquivo
@@ -83,7 +107,9 @@ export class SupabaseExcelService {
         arquivo: fileName,
         path: filePath,
         url: publicUrlData.publicUrl,
-        tempo: uploadTime + 'ms'
+        tempo: uploadTime + 'ms',
+        tamanho: this.formatFileSize(file.size),
+        usuario: userId || 'anônimo'
       });
       
       return {
@@ -91,7 +117,8 @@ export class SupabaseExcelService {
         fileName: fileName,
         filePath: filePath,
         fileUrl: publicUrlData.publicUrl,
-        uploadTime: uploadTime
+        uploadTime: uploadTime,
+        fileSize: file.size
       };
       
     } catch (error) {
@@ -103,101 +130,85 @@ export class SupabaseExcelService {
         filePath: '',
         fileUrl: '',
         uploadTime: 0,
+        fileSize: file.size,
         error: error instanceof Error ? error.message : 'Erro desconhecido no upload'
       };
     }
   }
 
   /**
-   * Processa um arquivo Excel usando a Edge Function do Supabase
+   * Upload inteligente que escolhe a melhor estratégia baseada no tamanho
    */
-  async processExcelFile(file: File): Promise<ProcessExcelResult> {
+  async smartUpload(file: File, userId?: string, onProgress?: (progress: UploadProgress) => void): Promise<UploadResult> {
     try {
-      console.log('🚀 Processando arquivo Excel:', file.name);
-      
-      // 1. Primeiro fazer upload do arquivo para o storage
-      console.log('📤 Fazendo upload para Supabase Storage...');
-      const uploadResult = await this.uploadFile(file);
-      
-      if (!uploadResult.success) {
-        throw new Error(`Erro no upload: ${uploadResult.error}`);
+      // Validar arquivo primeiro
+      const validation = this.validateExcelFile(file);
+      if (!validation.valid) {
+        throw new Error(validation.error);
       }
       
-      console.log('✅ Upload concluído, processando via Edge Function...');
+      const fileSizeMB = file.size / (1024 * 1024);
       
-      // 2. Criar FormData para envio do arquivo para Edge Function
-      const formData = new FormData();
-      formData.append('file', file);
-
-      // 3. Fazer requisição para a Edge Function
-      const response = await fetch(this.edgeFunctionUrl, {
-        method: 'POST',
-        body: formData,
-        headers: {
-          // Adicionar autorização Supabase
-          'Authorization': `Bearer ${this.supabaseKey}`
-          // Não definir Content-Type para FormData - o browser define automaticamente
-        }
+      console.log('📊 Analisando estratégia de upload:', {
+        arquivo: file.name,
+        tamanho: this.formatFileSize(file.size),
+        tamanhoMB: Math.round(fileSizeMB * 100) / 100,
+        estrategia: fileSizeMB > 50 ? 'Upload para arquivo grande' : 'Upload normal'
       });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const result: ProcessExcelResult = await response.json();
       
-      if (!result.success) {
-        throw new Error(result.error || 'Erro desconhecido no processamento');
+      // Para arquivos maiores que 50MB, usar upload especializado
+      if (fileSizeMB > 50) {
+        return this.uploadLargeFile(file, userId, onProgress);
       }
-
-      console.log('✅ Arquivo processado com sucesso:', {
-        arquivo: result.fileName,
-        registros: result.totalRecords,
-        colunas: result.columns.length,
-        score: result.validation.score,
-        tempo: result.metadata.processingTime + 'ms',
-        uploadUrl: uploadResult.fileUrl
-      });
-
-      return result;
-
+      
+      // Para arquivos menores, usar upload normal
+      return this.uploadFile(file, userId, onProgress);
+      
     } catch (error) {
-      console.error('❌ Erro ao processar arquivo Excel:', error);
+      console.error('❌ Erro no upload inteligente:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Upload com chunking para arquivos muito grandes (>50MB)
+   */
+  async uploadLargeFile(file: File, userId?: string, onProgress?: (progress: UploadProgress) => void): Promise<UploadResult> {
+    const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB por chunk
+    
+    try {
+      console.log('📤 Iniciando upload de arquivo grande:', {
+        nome: file.name,
+        tamanho: this.formatFileSize(file.size),
+        chunks: Math.ceil(file.size / CHUNK_SIZE)
+      });
+
+      // Se o arquivo é menor que 50MB, usar upload normal
+      if (file.size <= CHUNK_SIZE) {
+        return this.uploadFile(file, userId, onProgress);
+      }
+
+      // TODO: Implementar upload com chunking
+      // Por enquanto, usar upload normal e monitorar performance
+      console.warn('⚠️ Arquivo grande detectado, usando upload normal. Considere implementar chunking se houver problemas.');
       
-      // Retornar resultado de erro estruturado
-      return {
-        success: false,
-        fileName: file.name,
-        fileSize: file.size,
-        totalRecords: 0,
-        columns: [],
-        preview: [],
-        validation: {
-          camposEncontrados: {},
-          camposFaltantes: [],
-          score: 0,
-          valido: false
-        },
-        metadata: {
-          sheets: [],
-          processedSheet: '',
-          encoding: '',
-          processingTime: 0
-        },
-        error: error instanceof Error ? error.message : 'Erro desconhecido'
-      };
+      return this.uploadFile(file, userId, onProgress);
+      
+    } catch (error) {
+      console.error('❌ Erro no upload de arquivo grande:', error);
+      throw error;
     }
   }
 
   /**
    * Processa um arquivo CSV e faz upload para o storage
    */
-  async processCSVFile(file: File): Promise<UploadResult> {
+  async processCSVFile(file: File, userId?: string): Promise<UploadResult> {
     try {
       console.log('📄 Processando arquivo CSV:', file.name);
       
       // Fazer upload do arquivo CSV para o storage
-      const uploadResult = await this.uploadFile(file);
+      const uploadResult = await this.uploadFile(file, userId);
       
       if (!uploadResult.success) {
         throw new Error(`Erro no upload: ${uploadResult.error}`);
@@ -215,19 +226,22 @@ export class SupabaseExcelService {
         filePath: '',
         fileUrl: '',
         uploadTime: 0,
+        fileSize: file.size,
         error: error instanceof Error ? error.message : 'Erro desconhecido'
       };
     }
   }
 
   /**
-   * Lista arquivos do storage
+   * Lista arquivos do storage para um usuário específico
    */
-  async listFiles(): Promise<{ success: boolean; files: any[]; error?: string }> {
+  async listFiles(userId?: string): Promise<{ success: boolean; files: any[]; error?: string }> {
     try {
+      const userPath = userId ? `energisa-uploads/${userId}` : 'energisa-uploads';
+      
       const { data, error } = await this.supabase.storage
         .from(this.storageBucket)
-        .list('energisa-uploads', {
+        .list(userPath, {
           limit: 100,
           offset: 0,
           sortBy: { column: 'created_at', order: 'desc' }
@@ -282,7 +296,7 @@ export class SupabaseExcelService {
    * Valida se o arquivo é um Excel válido
    */
   validateExcelFile(file: File): { valid: boolean; error?: string } {
-    // Verificar tipo de arquivo
+    // Verificar tipo de arquivo por extensão
     if (!file.name.match(/\.(xlsx|xls)$/i)) {
       return {
         valid: false,
@@ -290,12 +304,41 @@ export class SupabaseExcelService {
       };
     }
 
+    // Verificar MIME type
+    const allowedMimeTypes = [
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-excel',
+      'application/octet-stream'
+    ];
+    
+    if (file.type && !allowedMimeTypes.includes(file.type)) {
+      console.warn('⚠️ MIME type não reconhecido:', file.type, 'para arquivo:', file.name);
+      // Não bloquear por MIME type, pois alguns browsers podem não definir corretamente
+    }
+
     // Verificar tamanho (máximo 100MB)
     const maxSize = 100 * 1024 * 1024; // 100MB
     if (file.size > maxSize) {
       return {
         valid: false,
-        error: `Arquivo muito grande. Tamanho máximo: ${maxSize / 1024 / 1024}MB`
+        error: `Arquivo muito grande. Tamanho máximo: ${this.formatFileSize(maxSize)}. Tamanho atual: ${this.formatFileSize(file.size)}`
+      };
+    }
+
+    // Verificar se o arquivo não está vazio
+    if (file.size === 0) {
+      return {
+        valid: false,
+        error: 'Arquivo está vazio.'
+      };
+    }
+
+    // Verificar tamanho mínimo (1KB)
+    const minSize = 1024; // 1KB
+    if (file.size < minSize) {
+      return {
+        valid: false,
+        error: `Arquivo muito pequeno. Tamanho mínimo: ${this.formatFileSize(minSize)}`
       };
     }
 
@@ -314,11 +357,10 @@ export class SupabaseExcelService {
     
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
-
   /**
    * Gerar relatório de validação FIDC
    */
-  generateValidationReport(validation: ProcessExcelResult['validation']): string {
+  generateValidationReport(validation: ValidacaoFIDC): string {
     const { score, valido, camposFaltantes, camposEncontrados } = validation;
     
     let report = `📊 Score de Compatibilidade FIDC: ${score}%\n\n`;
