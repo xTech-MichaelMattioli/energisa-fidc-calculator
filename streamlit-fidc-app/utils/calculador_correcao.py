@@ -213,3 +213,148 @@ class CalculadorCorrecao:
         df = self.calcular_valor_corrigido_final(df)
         
         return df
+    
+    def mapear_aging_para_taxa(self, aging: str) -> str:
+        """
+        Mapeia aging detalhado para categorias de taxa de recuperação.
+        """
+        # Dicionário de mapeamento aging -> categoria taxa
+        mapeamento = {
+            'A vencer': 'A vencer',
+            'Menor que 30 dias': 'Primeiro ano',
+            'De 31 a 59 dias': 'Primeiro ano',
+            'De 60 a 89 dias': 'Primeiro ano',
+            'De 90 a 119 dias': 'Primeiro ano',
+            'De 120 a 359 dias': 'Primeiro ano',
+            'De 360 a 719 dias': 'Segundo ano',
+            'De 720 a 1080 dias': 'Terceiro ano',
+            'Maior que 1080 dias': 'Demais anos'
+        }
+        
+        return mapeamento.get(aging, 'Não identificado')
+    
+    def adicionar_taxa_recuperacao(self, df: pd.DataFrame, df_taxa_recuperacao: pd.DataFrame) -> pd.DataFrame:
+        """
+        Adiciona taxa de recuperação e prazo de recebimento cruzando Empresa, Tipo e Aging.
+        """
+        if df.empty or df_taxa_recuperacao.empty:
+            st.warning("⚠️ Dados insuficientes para calcular taxa de recuperação")
+            df['aging_taxa'] = 'Não identificado'
+            df['taxa_recuperacao'] = 0.0
+            df['prazo_recebimento'] = 0
+            df['valor_recuperavel'] = 0.0
+            return df
+        
+        with st.spinner("🔄 Aplicando taxas de recuperação..."):
+            df = df.copy()
+            
+            # Mapear aging detalhado para categorias de taxa
+            df['aging_taxa'] = df['aging'].apply(self.mapear_aging_para_taxa)
+            
+            # Fazer merge com dados de taxa de recuperação
+            # Chaves: Empresa, Tipo, Aging (mapeado)
+            
+
+            df_merged = df.merge(
+                df_taxa_recuperacao,
+                left_on=['empresa', 'tipo', 'aging_taxa'],
+                right_on=['Empresa', 'Tipo', 'Aging'],
+                how='left'
+            )
+            # st.dataframe(df[['empresa', 'tipo', 'aging_taxa']].drop_duplicates(), use_container_width=True)
+            # st.dataframe(df_taxa_recuperacao[['Empresa', 'Tipo', 'Aging']].drop_duplicates(), use_container_width=True)
+            # st.dataframe(df_merged, use_container_width=True)
+            
+            # Preencher valores não encontrados
+            df_merged['Taxa de recuperação'] = df_merged['Taxa de recuperação'].fillna(0.0)
+            df_merged['Prazo de recebimento'] = df_merged['Prazo de recebimento'].fillna(0)
+            
+            # Renomear colunas para padrão
+            df_merged = df_merged.rename(columns={
+                'Taxa de recuperação': 'taxa_recuperacao',
+                'Prazo de recebimento': 'prazo_recebimento'
+            })
+            
+            # Calcular valor recuperável (valor corrigido * taxa de recuperação)
+            df_merged['valor_recuperavel'] = df_merged['valor_corrigido'] * (df_merged['taxa_recuperacao'])
+            
+            # Remover colunas duplicadas do merge
+            colunas_para_remover = ['Empresa', 'Tipo', 'Aging']
+            for col in colunas_para_remover:
+                if col in df_merged.columns:
+                    df_merged = df_merged.drop(columns=[col])
+            
+            # Estatísticas de match
+            total_registros = len(df)
+            registros_com_taxa = (df_merged['taxa_recuperacao'] > 0).sum()
+            percentual_match = (registros_com_taxa / total_registros) * 100
+            
+            st.success(f"✅ Taxa de recuperação aplicada: {registros_com_taxa:,}/{total_registros:,} registros ({percentual_match:.1f}%)")
+            
+            # Mostrar estatísticas por categoria
+            if registros_com_taxa > 0:
+                stats_taxa = df_merged[df_merged['taxa_recuperacao'] > 0].groupby('aging_taxa').agg({
+                    'taxa_recuperacao': ['count', 'mean'],
+                    'valor_recuperavel': 'sum'
+                }).round(2)
+        
+        return df_merged
+    
+    def gerar_resumo_recuperacao(self, df: pd.DataFrame, nome_base: str):
+        """
+        Gera resumo da recuperação.
+        """
+        if 'valor_recuperavel' not in df.columns:
+            return
+        
+        # st.subheader(f"🎯 Resumo da Recuperação - {nome_base.upper()}")
+        
+        valor_corrigido = df['valor_corrigido'].sum()
+        valor_recuperavel = df['valor_recuperavel'].sum()
+        percentual_recuperacao = (valor_recuperavel / valor_corrigido) * 100 if valor_corrigido > 0 else 0
+        
+        # Breakdown por aging
+        if 'aging_taxa' in df.columns:
+            # st.subheader("📈 Recuperação por Aging")
+            
+            recovery_breakdown = df.groupby('aging_taxa').agg({
+                'valor_corrigido': 'sum',
+                'valor_recuperavel': 'sum',
+                'taxa_recuperacao': 'mean'
+            }).round(2)
+            
+            recovery_breakdown['percentual_recuperacao'] = (
+                recovery_breakdown['valor_recuperavel'] / 
+                recovery_breakdown['valor_corrigido'] * 100
+            ).round(1)
+            
+            recovery_breakdown.columns = [
+                'Valor Corrigido', 
+                'Valor Recuperável', 
+                'Taxa Média (%)', 
+                'Recuperação (%)'
+            ]
+            
+            # st.dataframe(recovery_breakdown, use_container_width=True)
+    
+    def processar_correcao_completa_com_recuperacao(self, df: pd.DataFrame, nome_base: str, df_taxa_recuperacao: pd.DataFrame = None) -> pd.DataFrame:
+        """
+        Executa todo o processo de correção monetária incluindo taxa de recuperação.
+        """
+        if df.empty:
+            return df
+        
+        # Processamento padrão de correção
+        df = self.processar_correcao_completa(df, nome_base)
+        
+        # Adicionar taxa de recuperação se disponível
+        if df_taxa_recuperacao is not None and not df_taxa_recuperacao.empty:
+            df = self.adicionar_taxa_recuperacao(df, df_taxa_recuperacao)
+            
+            # Gerar resumo com recuperação
+            self.gerar_resumo_recuperacao(df, nome_base)
+        else:
+            # Gerar resumo padrão
+            self.gerar_resumo_correcao(df, nome_base)
+        
+        return df

@@ -26,8 +26,6 @@ class CalculadorAging:
             datas_convertidas = pd.to_datetime(serie_data, errors='coerce')
             validas = datas_convertidas.notna().sum()
             total = len(serie_data)
-            
-            st.info(f"📅 Datas convertidas: {validas}/{total} ({validas/total:.1%})")
             return datas_convertidas
         except Exception as e:
             st.error(f"❌ Erro na conversão de datas: {e}")
@@ -37,7 +35,6 @@ class CalculadorAging:
         """
         Calcula dias de atraso entre vencimento e data base.
         """
-        st.subheader("⏰ Cálculo de Aging")
         
         df = df.copy()
         
@@ -95,23 +92,9 @@ class CalculadorAging:
         """
         with st.spinner("🏷️ Aplicando classificação de aging..."):
             df = df.copy()
-            
+
             # Aplicar classificação
             df['aging'] = df['dias_atraso'].apply(self.classificar_aging)
-            
-            # Estatísticas de distribuição
-            aging_stats = df['aging'].value_counts()
-            
-            st.subheader("📊 Distribuição por Aging")
-            
-            # Criar DataFrame para exibição
-            aging_df = pd.DataFrame({
-                'Categoria': aging_stats.index,
-                'Quantidade': aging_stats.values,
-                'Percentual': (aging_stats.values / len(df) * 100).round(1)
-            })
-            
-            st.dataframe(aging_df, use_container_width=True)
         
         return df
     

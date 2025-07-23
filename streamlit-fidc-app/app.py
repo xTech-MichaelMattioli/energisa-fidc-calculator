@@ -143,7 +143,7 @@ def main():
                 "📋 1. Configurações",
                 "📂 2. Carregamento de Dados",
                 "🗺️ 3. Mapeamento de Campos", 
-                "💰 4. Correção Monetária"
+                "💰 4. Correção Monetária e Valor Justo"
             ]
         )
         
@@ -158,7 +158,6 @@ def main():
             total_registros = sum(info['registros'] for info in st.session_state.arquivos_processados.values())
             total_arquivos = len(st.session_state.arquivos_processados)
             st.caption(f"📁 {total_arquivos} arquivo(s)")
-            st.caption(f"📊 {total_registros:,} registros")
         else:
             st.warning("⏳ Arquivos não processados")
         
@@ -177,6 +176,11 @@ def main():
         else:
             st.warning("⏳ Resultados pendentes")
         
+        if 'df_taxa_recuperacao' in st.session_state and not st.session_state.df_taxa_recuperacao.empty:
+            st.success("✅ Taxa de recuperação configurada")
+        else:
+            st.error("❌ Taxa de recuperação OBRIGATÓRIA")
+        
         st.markdown("---")
         
         # Exibir parâmetros atuais
@@ -194,10 +198,12 @@ def main():
         etapa_mapeamento()
     elif etapa.startswith("💰 4"):
         etapa_correcao()
+    elif etapa.startswith("📈 5"):
+        etapa_taxa_recuperacao()
 
 def etapa_configuracoes():
     """Etapa 1: Configurações e Parâmetros"""
-    st.header("📋 MÓDULO 1: CONFIGURAÇÕES E PARÂMETROS")
+    st.header("📋 CONFIGURAÇÕES E PARÂMETROS")
     
     # Parâmetros financeiros com destaque
     st.subheader("💰 Parâmetros Financeiros")
@@ -250,209 +256,84 @@ def etapa_configuracoes():
     # Gráficos dos índices de correção
     st.subheader("📊 Evolução do Índice de Correção Monetária")
     
-    # Obter dados dos índices a partir dos parâmetros
+    # Adicionar controles para o gráfico
+    col_controles1, col_controles2 = st.columns(2)
+    
+
+    # Obter dados dos índices novamente para a tabela
+    dados_igpm = st.session_state.params.indices_igpm
+    df_igpm = pd.DataFrame(list(dados_igpm.items()), columns=['Periodo', 'Valor'])
+    df_igpm['Data'] = pd.to_datetime(df_igpm['Periodo'], format='%Y.%m', errors='coerce')
+    df_igpm = df_igpm.dropna(subset=['Data'])
+    df_igpm['Indice'] = 'IGP-M'
+    df_igpm = df_igpm.sort_values('Data')
+    
+    dados_ipca = st.session_state.params.indices_ipca
+    df_ipca = pd.DataFrame(list(dados_ipca.items()), columns=['Periodo', 'Valor'])
+    df_ipca['Data'] = pd.to_datetime(df_ipca['Periodo'], format='%Y.%m', errors='coerce')
+    df_ipca = df_ipca.dropna(subset=['Data'])
+    df_ipca['Indice'] = 'IPCA'
+    df_ipca = df_ipca.sort_values('Data')
+    
+    # Combinar todos os dados
+    df_completo = pd.concat([
+        df_igpm[['Periodo', 'Valor', 'Indice']],
+        df_ipca[['Periodo', 'Valor', 'Indice']]
+    ], ignore_index=True)
+    
+    # Ordenar por período
+    df_completo['Data_ord'] = pd.to_datetime(df_completo['Periodo'], format='%Y.%m', errors='coerce')
+    df_completo = df_completo.dropna(subset=['Data_ord'])
+    df_completo = df_completo.sort_values('Data_ord')
+    
+    # Preparar tabela de exibição com valores formatados
+    df_tabela = df_completo[['Periodo', 'Valor', 'Indice']].copy()
+    df_tabela['Valor'] = df_tabela['Valor'].round(2).astype(int)  # Converter para inteiro
+    df_tabela.columns = ['Período', 'Índice', 'Tipo']
+
+    # Converter Período para datetime se necessário
+    df_tabela['Período'] = pd.to_datetime(df_tabela['Período'].str.replace('.', '-'), format='%Y-%m')
+
+    # Gráfico
+    fig = px.line(
+        df_tabela,
+        x='Período',
+        y='Índice',
+        color='Tipo',
+        markers=True,
+        title='Evolução dos Índices por Período'
+    )
+
+    fig.update_layout(xaxis_title='Período', yaxis_title='Índice (%)')
+
+    # Streamlit
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Tabela consolidada com todos os valores
+    st.subheader("📋 Tabela dos Índices de Correção")
+    
     try:
-        # Dados do IGP-M (do parametros_correcao)
-        dados_igpm = st.session_state.params.indices_igpm
-        df_igpm = pd.DataFrame(list(dados_igpm.items()), columns=['Periodo', 'Valor'])
-        df_igpm['Data'] = pd.to_datetime(df_igpm['Periodo'], format='%Y.%m')
-        df_igpm['Indice'] = 'IGP-M'
-        df_igpm = df_igpm.sort_values('Data')
         
-        # Dados do IPCA (do parametros_correcao)
-        dados_ipca = st.session_state.params.indices_ipca
-        df_ipca = pd.DataFrame(list(dados_ipca.items()), columns=['Periodo', 'Valor'])
-        df_ipca['Data'] = pd.to_datetime(df_ipca['Periodo'], format='%Y.%m')
-        df_ipca['Indice'] = 'IPCA'
-        df_ipca = df_ipca.sort_values('Data')
         
-        # Normalizar IPCA para continuar do último valor do IGP-M
-        ultimo_igpm = dados_igpm['2021.05']  # Último valor IGP-M (mai/2021)
-        primeiro_ipca = dados_ipca['2021.06']  # Primeiro valor IPCA (jun/2021)
-        fator_normalizacao = ultimo_igpm / primeiro_ipca
-        
-        df_ipca['Valor_normalizado'] = df_ipca['Valor'] * fator_normalizacao
-        df_ipca['Valor'] = df_ipca['Valor_normalizado']
-        
-        # Gráfico combinado com continuidade
-        fig_indices = go.Figure()
-        
-        # Linha IGP-M (1994 até mai/2021)
-        fig_indices.add_trace(go.Scatter(
-            x=df_igpm['Data'],
-            y=df_igpm['Valor'],
-            mode='lines',
-            name='IGP-M',
-            line=dict(color='#1f77b4', width=3),
-            hovertemplate='<b>IGP-M</b><br>Período: %{x|%m/%Y}<br>Índice: %{y:.2f}<extra></extra>'
-        ))
-        
-        # Linha IPCA (jun/2021 em diante)
-        fig_indices.add_trace(go.Scatter(
-            x=df_ipca['Data'],
-            y=df_ipca['Valor'],
-            mode='lines',
-            name='IPCA',
-            line=dict(color='#ff7f0e', width=3),
-            hovertemplate='<b>IPCA</b><br>Período: %{x|%m/%Y}<br>Índice: %{y:.2f}<extra></extra>'
-        ))
-        
-        # Configurações do layout
-        fig_indices.update_layout(
-            title={
-                'text': 'Evolução do Índice de Correção Monetária (IGP-M + IPCA)',
-                'x': 0.5,
-                'font': {'size': 20, 'family': 'Arial Black', 'color': '#00A859'}
-            },
-            xaxis_title='Período',
-            yaxis_title='Índice Acumulado (Base 100 = Agosto/1994)',
-            hovermode='x unified',
-            height=650,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=14, family='Arial Black')
-            ),
-            margin=dict(l=60, r=60, t=100, b=60),
-            plot_bgcolor='white',
-            paper_bgcolor='white'
-        )
-        
-        # Adicionar linha vertical para marcar transição
-        fig_indices.add_vline(
-            x=pd.to_datetime('2021-05-31'),
-            line_dash="dash",
-            line_color="red",
-            line_width=2,
-            annotation_text="Transição IGP-M → IPCA",
-            annotation_position="top",
-            annotation_font_size=12,
-            annotation_font_color="red"
-        )
-        
-        # Customizar eixos
-        fig_indices.update_xaxes(
-            showgrid=True,
-            gridcolor='lightgray',
-            showline=True,
-            linecolor='black',
-            linewidth=2
-        )
-        fig_indices.update_yaxes(
-            showgrid=True,
-            gridcolor='lightgray',
-            showline=True,
-            linecolor='black',
-            linewidth=2
-        )
-        
-        st.plotly_chart(fig_indices, use_container_width=True)
-        
-        # Informações sobre os índices
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info(f"""
-            **IGP-M (ago/1994 até mai/2021)**
-            
-            📊 **Base:** 100 = Agosto/1994  
-            📈 **Registros:** {len(df_igpm)} períodos  
-            🎯 **Aplicação:** Débitos vencidos até mai/2021  
-            📋 **Último valor:** {ultimo_igpm:.2f} (mai/2021)
-            """)
-        
-        with col2:
-            st.info(f"""
-            **IPCA (jun/2021 em diante)**
-            
-            📊 **Continuidade:** Normalizado para IGP-M  
-            📈 **Registros:** {len(df_ipca)} períodos  
-            🎯 **Aplicação:** Débitos vencidos a partir de jun/2021  
-            📋 **Último valor:** {df_ipca['Valor'].iloc[-1]:.2f} ({df_ipca['Periodo'].iloc[-1]})
-            """)
-        
-        # Tabela consolidada com todos os valores
-        st.subheader("📋 Tabela Completa dos Índices")
-        
-        # Combinar todos os dados
-        df_completo = pd.concat([
-            df_igpm[['Periodo', 'Valor', 'Indice']],
-            df_ipca[['Periodo', 'Valor', 'Indice']]
-        ], ignore_index=True)
-        
-        # Ordenar por período
-        df_completo['Data_ord'] = pd.to_datetime(df_completo['Periodo'], format='%Y.%m')
-        df_completo = df_completo.sort_values('Data_ord')
-        
-        # Preparar tabela de exibição
-        df_tabela = df_completo[['Periodo', 'Valor', 'Indice']].copy()
-        df_tabela['Valor'] = df_tabela['Valor'].round(4)
-        df_tabela.columns = ['Período', 'Valor', 'Índice']
-        
-        # Exibir tabela com filtro
-        st.write(f"**Total de {len(df_tabela)} registros** (agosto/1994 até {df_completo['Periodo'].iloc[-1]})")
-        
-        # Opções de filtro
-        col1, col2 = st.columns(2)
-        with col1:
-            filtro_indice = st.selectbox(
-                "Filtrar por índice:",
-                options=['Todos', 'IGP-M', 'IPCA'],
-                index=0
-            )
-        
-        with col2:
-            mostrar_ultimos = st.number_input(
-                "Mostrar últimos N registros:",
-                min_value=10,
-                max_value=len(df_tabela),
-                value=24,
-                step=6
-            )
-        
-        # Aplicar filtros
-        df_filtrado = df_tabela.copy()
-        if filtro_indice != 'Todos':
-            df_filtrado = df_filtrado[df_filtrado['Índice'] == filtro_indice]
-        
-        # Mostrar últimos N registros
-        df_exibicao = df_filtrado.tail(mostrar_ultimos)
+        # Exibir informação sobre todos os registros
+        st.write(f"**Total de {len(df_tabela)} registros disponíveis** (agosto/1994 até {df_completo['Periodo'].iloc[-1]})")
         
         st.dataframe(
-            df_exibicao, 
+            df_tabela, 
             use_container_width=True, 
             hide_index=True,
-            height=500
+            height=min(800, len(df_tabela) * 35 + 100)
         )
-        
-        # Estatísticas rápidas
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("📊 Total IGP-M", f"{len(df_igpm)} períodos")
-        with col2:
-            st.metric("📊 Total IPCA", f"{len(df_ipca)} períodos")
-        with col3:
-            variacao_total = ((df_completo['Valor'].iloc[-1] / df_completo['Valor'].iloc[0]) - 1) * 100
-            st.metric("📈 Variação Total", f"{variacao_total:,.1f}%")
     
     except Exception as e:
-        st.warning(f"⚠️ Erro ao carregar dados dos índices: {e}\n\nSerão utilizados índices padrão durante o processamento.")
+        st.warning(f"⚠️ Erro ao carregar dados dos índices para tabela: {e}")
         
-        # Informação básica sem gráficos
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info("**IGP-M (até maio/2021)**\n\nÍndice Geral de Preços do Mercado utilizado para correção monetária de débitos vencidos até maio de 2021.\n\n📊 **Base:** 100 = Agosto/1994")
-        
-        with col2:
-            st.info("**IPCA (a partir de junho/2021)**\n\nÍndice Nacional de Preços ao Consumidor Amplo utilizado para correção monetária de débitos vencidos a partir de junho de 2021.")
+        # Informação básica caso a tabela não carregue
+        st.info("**Tabela de índices temporariamente indisponível**\n\nOs índices serão utilizados normalmente durante os cálculos.")
 
 def etapa_carregamento():
     """Etapa 2: Carregamento da Base"""
-    st.header("📂 MÓDULO 2: CARREGAMENTO DA BASE")
+    st.header("📂 CARREGAMENTO DA BASE")
     
     # Inicializar estados
     if 'arquivos_para_processar' not in st.session_state:
@@ -703,7 +584,7 @@ def etapa_carregamento():
 
 def etapa_mapeamento():
     """Etapa 3: Mapeamento de Campos"""
-    st.header("🗺️ MÓDULO 3: MAPEAMENTO DE CAMPOS")
+    st.header("🗺️ MAPEAMENTO DE CAMPOS")
     
     # Verificar se há arquivos carregados
     if 'df_carregado' not in st.session_state or not st.session_state.df_carregado:
@@ -904,7 +785,7 @@ def etapa_mapeamento():
 
 def etapa_correcao():
     """Etapa 4: Correção Monetária (inclui cálculo automático de aging)"""
-    st.header("💰 MÓDULO 4: CORREÇÃO MONETÁRIA")
+    st.header("💰 CORREÇÃO MONETÁRIA e VALOR JUSTO")
     
     # Verificar se temos dados padronizados
     if 'df_padronizado' not in st.session_state or st.session_state.df_padronizado.empty:
@@ -915,8 +796,133 @@ def etapa_correcao():
     calc_aging = CalculadorAging(st.session_state.params)
     calc_correcao = CalculadorCorrecao(st.session_state.params)
     
-    # Botão para calcular correção (inclui aging automaticamente)
-    if st.button("💰 Calcular Correção Monetária", type="primary"):
+    # Verificar se temos dados de taxa de recuperação (OBRIGATÓRIO)
+    tem_taxa_recuperacao = 'df_taxa_recuperacao' in st.session_state and not st.session_state.df_taxa_recuperacao.empty
+    
+    # Seção OBRIGATÓRIA para upload de taxa de recuperação
+    st.subheader("📈 Configurar Taxa de Recuperação (OBRIGATÓRIO)")
+    
+    if not tem_taxa_recuperacao:
+        st.warning("⚠️ **ATENÇÃO:** O arquivo de taxa de recuperação é obrigatório para realizar os cálculos de correção monetária.")
+    
+    with st.expander("📤 Upload da Taxa de Recuperação", expanded=not tem_taxa_recuperacao):
+        st.info("""
+        **📋 Instruções:** 
+        
+        Faça o upload do arquivo Excel com as taxas de recuperação. O arquivo deve conter:
+        - Uma aba chamada "Input" 
+        - Estrutura com empresas marcadas com "x" 
+        - Tipos: Privada, Público, Hospital
+        - Aging: A vencer, Primeiro ano, Segundo ano, Terceiro ano, Demais anos
+        - Taxas e prazos de recebimento
+        """)
+        
+        # Upload do arquivo
+        uploaded_file_taxa = st.file_uploader(
+            "📤 Selecione o arquivo de Taxa de Recuperação",
+            type=['xlsx', 'xls'],
+            help="Arquivo Excel com as taxas de recuperação por empresa, tipo e aging",
+            key="upload_taxa_modulo4"
+        )
+        
+        if uploaded_file_taxa is not None:
+            try:
+                with st.spinner("🔄 Processando arquivo de taxa de recuperação..."):
+                    # Ler a aba "input"
+                    df_taxa_upload = pd.read_excel(uploaded_file_taxa, sheet_name="Input", header=None)
+                    
+                    # Parâmetros para processamento
+                    tipos = ["Privado", "Público", "Hospital"]
+                    aging_labels = ["A vencer", "Primeiro ano", "Segundo ano", "Terceiro ano", "Demais anos"]
+                    
+                    empresa = None
+                    dados_taxa = []
+                    
+                    # Processar o DataFrame conforme a lógica fornecida
+                    for i in range(len(df_taxa_upload)):
+                        row = df_taxa_upload.iloc[i]
+
+                        # Detectar empresa pelo "x"
+                        for j in range(len(row) - 1):
+                            if str(row[j]).strip().lower() == "x":
+                                empresa = str(row[j + 1]).strip()
+
+                        # Se não tiver empresa atual, pula
+                        if not empresa:
+                            continue
+
+                        # Cada linha pode ter até 3 blocos: Privada, Público, Hospital
+                        for offset, tipo in zip([1, 5, 9], tipos):  # colunas: aging, taxa, prazo
+                            try:
+                                aging = str(row[offset]).strip()
+                                taxa = row[offset + 1]
+                                prazo = row[offset + 2]
+
+                                if aging in aging_labels and pd.notna(taxa) and pd.notna(prazo):
+                                    dados_taxa.append({
+                                        "Empresa": empresa,
+                                        "Tipo": tipo,
+                                        "Aging": aging,
+                                        "Taxa de recuperação": float(str(taxa).replace(",", ".")),
+                                        "Prazo de recebimento": int(prazo)
+                                    })
+                            except (IndexError, ValueError):
+                                continue
+                    
+                    # Criar DataFrame final
+                    if dados_taxa:
+                        df_taxa_recuperacao_nova = pd.DataFrame(dados_taxa)
+                        st.session_state.df_taxa_recuperacao = df_taxa_recuperacao_nova
+                        
+                        # Resetar flag de cálculo para forçar recálculo
+                        if 'df_final' in st.session_state:
+                            del st.session_state.df_final
+                        if 'df_com_aging' in st.session_state:
+                            del st.session_state.df_com_aging
+                        
+                        st.success(f"✅ Taxa de recuperação carregada! {len(df_taxa_recuperacao_nova)} registros de {df_taxa_recuperacao_nova['Empresa'].nunique()} empresa(s).")
+                        
+                        # Preview dos dados carregados
+                        st.subheader("📊 Preview da Taxa de Recuperação Carregada")
+                        # Exibir amostra balanceada por empresa
+                        empresas = df_taxa_recuperacao_nova['Empresa'].unique()
+                        amostra = pd.concat([
+                            df_taxa_recuperacao_nova[df_taxa_recuperacao_nova['Empresa'] == emp].head(1)
+                            for emp in empresas
+                        ])
+
+                        # Se ainda quiser limitar a 10 linhas no máximo
+                        amostra = amostra.head(10)
+
+                        st.dataframe(amostra, use_container_width=True)
+                        
+                        # st.rerun()  # Atualizar a interface
+                    else:
+                        st.error("❌ Nenhum dado válido encontrado no arquivo. Verifique a estrutura do arquivo.")
+                        
+            except Exception as e:
+                st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+                st.error("Verifique se o arquivo possui uma aba 'Input' e se a estrutura está correta.")
+    
+    # uploaded_file_taxa = None
+    # del st.session_state.df_taxa_recuperacao
+
+    # Atualizar variável após possível upload
+    tem_taxa_recuperacao = 'df_taxa_recuperacao' in st.session_state and not st.session_state.df_taxa_recuperacao.empty
+
+    # st.code(tem_taxa_recuperacao)
+    # st.session_state.df_taxa_recuperacao
+    
+    st.markdown("---")
+    
+    # SÓ PERMITIR CÁLCULO SE TIVER TAXA DE RECUPERAÇÃO
+    if not tem_taxa_recuperacao:
+        st.error("❌ **Não é possível prosseguir sem a taxa de recuperação.**")
+        st.info("� Faça o upload do arquivo de taxa de recuperação acima para continuar.")
+        return
+    
+    # Botão para calcular correção (SÓ APARECE SE TIVER TAXA)
+    if st.button("💰 Calcular Correção Monetária com Taxa de Recuperação", type="primary"):
         try:
             with st.spinner("⚙️ Processando aging e calculando correção monetária..."):
                 # Primeiro, calcular aging automaticamente
@@ -926,91 +932,166 @@ def etapa_correcao():
                     st.error("❌ Erro ao calcular aging. Verifique os dados de entrada.")
                     return
                 
-                # Segundo, calcular correção monetária
-                df_final = calc_correcao.processar_correcao_completa(df_com_aging.copy(), "Distribuidora")
+                # Sempre usar método com taxa de recuperação (já que é obrigatória)
+                df_final = calc_correcao.processar_correcao_completa_com_recuperacao(
+                    df_com_aging.copy(), 
+                    "Distribuidora", 
+                    st.session_state.df_taxa_recuperacao
+                )
                 
                 if not df_final.empty:
                     st.session_state.df_com_aging = df_com_aging
+                    df_final = df_final.dropna(subset=['empresa'])
                     st.session_state.df_final = df_final
-                    st.success("✅ Correção monetária calculada com sucesso!")
+                    
+                    st.success("✅ Correção monetária com taxa de recuperação calculada com sucesso!")
                 else:
                     st.error("❌ Erro ao calcular correção monetária.")
                     return
                     
         except Exception as e:
             st.error(f"❌ Erro ao processar correção: {str(e)}")
-    
+
     # Mostrar resultados se já foram calculados
     if 'df_final' in st.session_state and not st.session_state.df_final.empty:
        
         st.markdown("---")
         
         # 2. Correção Monetária - Tabela de Resultados
-        st.subheader("💰 Correção Monetária")
-        st.dataframe(st.session_state.df_final.head(30), use_container_width=True)
+        st.subheader("💰 Resultados da Correção Monetária e Valor Justo")
         
+        # Verificar se temos colunas de taxa de recuperação (sempre deveria ter)
+        colunas_taxa = ['aging_taxa', 'taxa_recuperacao', 'prazo_recebimento', 'valor_recuperavel']
+        tem_colunas_recuperacao = all(col in st.session_state.df_final.columns for col in colunas_taxa)
+        
+        if tem_colunas_recuperacao:
+            st.success("✅ **Resultados com taxa de recuperação**")
+        else:
+            st.warning("⚠️ **Resultados sem taxa de recuperação** - Recalcule para incluir as taxas")
+        
+        # Mostrar colunas principais + taxa de recuperação
+        colunas_principais = [
+            'empresa', 'tipo', 'nome_cliente', 'contrato', 
+            'valor_liquido', 'aging', 'aging_taxa',
+            'valor_corrigido', 'taxa_recuperacao', 'valor_recuperavel'
+        ]
+
+        ordem_aging = [
+            'Menor que 30 dias',
+            'De 31 a 59 dias',
+            'De 60 a 89 dias',
+            'De 90 a 119 dias',
+            'De 120 a 359 dias',
+            'De 360 a 719 dias',
+            'De 720 a 1080 dias',
+            'Maior que 1080 dias',
+            'A vencer'
+        ]
+
+        # 📊 Visão Detalhada por Empresa, Tipo e Classificação
+        st.subheader("📊 Agrupamento Detalhado - Por Empresa, Tipo, Classe, Status e Situação")
+        
+        df_agg1 = (
+            st.session_state.df_final
+            .groupby(['empresa', 'tipo', 'classe', 'status', 'situacao', 'aging', 'aging_taxa'], dropna=False)
+            .agg({
+                'valor_corrigido': 'sum',
+                'taxa_recuperacao': 'mean',
+                'valor_recuperavel': 'sum'
+            })
+            .reset_index()
+        )
+
+        df_agg1['aging'] = pd.Categorical(df_agg1['aging'], categories=ordem_aging, ordered=True)
+        df_agg1 = df_agg1.sort_values(['empresa', 'tipo', 'classe', 'status', 'situacao', 'aging'])
+
+        st.dataframe(df_agg1, use_container_width=True, hide_index=True)
+
+        # 🎯 Visão Consolidada por Empresa e Aging
+        st.subheader("🎯 Agrupamento Consolidado - Por Empresa e Aging")
+        st.caption("Valores consolidados por empresa e faixa de aging, incluindo valor principal, líquido, corrigido e recuperável")
+        
+        df_agg2 = (
+            st.session_state.df_final
+            .groupby(['empresa', 'aging', 'aging_taxa'], dropna=False)
+            .agg({
+                'valor_principal': 'sum',
+                'valor_liquido': 'sum',
+                'valor_corrigido': 'sum',
+                'valor_recuperavel': 'sum'
+            })
+            .reset_index()
+        )
+
+        df_agg2['aging'] = pd.Categorical(df_agg2['aging'], categories=ordem_aging, ordered=True)
+        df_agg2 = df_agg2.sort_values(['empresa', 'aging'])
+
+        st.dataframe(df_agg2, use_container_width=True, hide_index=True)
+
+        # 📈 Visão Geral por Aging
+        st.subheader("📈 Agrupamento Geral - Por Aging e Taxa de Recuperação")
+        st.caption("Visão consolidada geral agrupada apenas por faixa de aging, mostrando totais gerais")
+        
+        df_agg3 = (
+            st.session_state.df_final
+            .groupby(['aging', 'aging_taxa'], dropna=False)
+            .agg({
+                'valor_principal': 'sum',
+                'valor_liquido': 'sum',
+                'valor_corrigido': 'sum',
+                'valor_recuperavel': 'sum'
+            })
+            .reset_index()
+        )
+
+        df_agg3['aging'] = pd.Categorical(df_agg3['aging'], categories=ordem_aging, ordered=True)
+        df_agg3 = df_agg3.sort_values(['aging'])
+
+        st.dataframe(df_agg3, use_container_width=True, hide_index=True)
+
+        # 💰 Resumo Total Consolidado
         st.markdown("---")
+        st.subheader("💰 Resumo Total Consolidado")
         
-        # 3. Download dos Dados com Correção Monetária
-        st.subheader("📥 Download dos Dados com Correção Monetária")
+        # Calcular totais gerais
+        total_principal = df_agg3['valor_principal'].sum()
+        total_liquido = df_agg3['valor_liquido'].sum()
+        total_corrigido = df_agg3['valor_corrigido'].sum()
+        total_recuperavel = df_agg3['valor_recuperavel'].sum()
         
-        # Opção 1: Download consolidado
-        col1, col2 = st.columns([3, 1])
+        # Criar 4 colunas para as métricas
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.write(f"**📊 Base Consolidada com Correção** - {len(st.session_state.df_final):,} registros")
+            st.metric(
+                "📊 Valor Principal Total",
+                f"R$ {total_principal:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                help="Soma total dos valores principais de todas as faixas de aging"
+            )
         
         with col2:
-            # Upload para Supabase Storage e gerar URL
-            try:
-                with st.spinner("📊 Gerando e enviando Excel para storage..."):
-                    from io import BytesIO
-                    import tempfile
-                    import os
-                    
-                    # Gerar arquivo temporário
-                    excel_buffer = BytesIO()
-                    st.session_state.df_final.to_excel(excel_buffer, index=False, engine='openpyxl')
-                    excel_buffer.seek(0)
-                    
-                    # Nome do arquivo único
-                    filename = f"correcao_monetaria_consolidada_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                    
-                    # Upload para Supabase Storage
-                    response = supabase.storage.from_("fidc-files").upload(
-                        filename, 
-                        excel_buffer.getvalue(),
-                        file_options={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
-                    )
-                    
-                    if response:
-                        # Gerar URL pública
-                        public_url = supabase.storage.from_("fidc-files").get_public_url(filename)
-                        
-                        st.success("✅ Arquivo enviado para storage!")
-                        st.markdown(f"**📊 [Baixar Excel Consolidado]({public_url})**")
-                        st.caption(f"Arquivo: {filename}")
-                    else:
-                        st.error("❌ Erro ao enviar arquivo para storage")
-                        
-            except Exception as e:
-                st.error(f"Erro ao processar arquivo: {str(e)}")
-                # Fallback para download direto em caso de erro
-                try:
-                    excel_buffer = BytesIO()
-                    st.session_state.df_final.to_excel(excel_buffer, index=False, engine='openpyxl')
-                    excel_buffer.seek(0)
-                    
-                    st.download_button(
-                        label="📊 Excel (Local)",
-                        data=excel_buffer.getvalue(),
-                        file_name=f"correcao_monetaria_consolidada_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_consolidado_fallback"
-                    )
-                except:
-                    st.error("❌ Erro no fallback também")
-    
+            st.metric(
+                "💧 Valor Líquido Total",
+                f"R$ {total_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                help="Soma total dos valores líquidos de todas as faixas de aging"
+            )
+        
+        with col3:
+            st.metric(
+                "⚡ Valor Corrigido Total",
+                f"R$ {total_corrigido:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                help="Soma total dos valores corrigidos monetariamente"
+            )
+        
+        with col4:
+            st.metric(
+                "🎯 Valor Recuperável Total",
+                f"R$ {total_recuperavel:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                help="Soma total dos valores esperados de recuperação"
+            )
+
+        # st.code(st.session_state.df_final.columns)
+        
     # Status da correção
     if 'df_final' in st.session_state and not st.session_state.df_final.empty:
         st.success(f"✅ Processamento concluído")
