@@ -30,3 +30,4 @@ dist-ssr
 *.ipynb
 /BASE_DADOS/
 
+__pycache__
