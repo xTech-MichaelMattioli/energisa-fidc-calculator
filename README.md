@@ -60,11 +60,31 @@ As distribuidoras da Energisa possuem carteiras significativas de créditos inad
 
 O sistema implementa uma metodologia complexa baseada em **análise de valor presente líquido** que considera:
 
+### Fundamentos Teóricos
+
+**Conceito de Valor Justo:** O valor justo representa o montante pelo qual um ativo pode ser negociado entre partes conhecedoras e dispostas a negociar em uma transação sem favorecimentos. No contexto de recebíveis em atraso, incorpora não apenas o valor principal da dívida, mas também os encargos financeiros decorrentes da inadimplência e a probabilidade de recuperação efetiva dos valores.
+
+**Metodologia de Correção Monetária:** A correção segue a metodologia híbrida estabelecida para o setor elétrico brasileiro, utilizando IGP-M até maio/2021 e IPCA a partir de junho/2021, refletindo mudanças regulatórias e maior aderência à inflação oficial.
+
 #### 1. **Classificação por Aging**
 ```
 A vencer → Menor que 30 dias → 31-59 dias → 60-89 dias → 90-119 dias → 
 120-359 dias → 360-719 dias → 720-1080 dias → Maior que 1080 dias
 ```
+
+**Critérios de Classificação Detalhados:**
+
+| Faixa de Dias | Classificação | Critério de Negócio |
+|---------------|---------------|-------------------|
+| DA ≤ 0 | A vencer | Ainda não vencido |
+| 0 < DA ≤ 30 | Menor que 30 dias | Inadimplência recente |
+| 30 < DA ≤ 59 | De 31 a 59 dias | Inadimplência inicial |
+| 59 < DA ≤ 89 | De 60 a 89 dias | Inadimplência estabelecida |
+| 89 < DA ≤ 119 | De 90 a 119 dias | Inadimplência consolidada |
+| 119 < DA ≤ 359 | De 120 a 359 dias | Inadimplência prolongada |
+| 359 < DA ≤ 719 | De 360 a 719 dias | Inadimplência de segundo ano |
+| 719 < DA ≤ 1080 | De 720 a 1080 dias | Inadimplência de terceiro ano |
+| DA > 1080 | Maior que 1080 dias | Inadimplência de longo prazo |
 
 #### 2. **Taxas de Recuperação por Categoria**
 | Aging | Taxa de Recuperação |
@@ -79,22 +99,113 @@ A vencer → Menor que 30 dias → 31-59 dias → 60-89 dias → 90-119 dias →
 | De 720 a 1080 dias | 1,00% |
 | Maior que 1080 dias | 0,70% |
 
-#### 3. **Fórmulas de Cálculo**
+**Metodologia de Correção Monetária Híbrida:**
+```
+Índice = {
+    IGP-M,  se data ≤ maio/2021
+    IPCA,   se data > maio/2021
+}
+```
+
+**Mapeamento de Aging para Categorias de Recuperação:**
+
+| Aging Detalhado | Categoria de Recuperação |
+|-----------------|-------------------------|
+| A vencer | A vencer |
+| Menor que 30 dias até De 120 a 359 dias | Primeiro ano |
+| De 360 a 719 dias | Segundo ano |
+| De 720 a 1080 dias | Terceiro ano |
+| Maior que 1080 dias | Demais anos |
+
+#### 3. **Modelagem Matemática Detalhada**
+
+**Cálculo do Valor Líquido:**
+```
+VL = VP - VNC - VT - VCIP
+```
+Onde:
+- **VL**: Valor Líquido (base para cálculos)
+- **VP**: Valor Principal (valor original da fatura)
+- **VNC**: Valor Não Cedido (parcelas excluídas da cessão)
+- **VT**: Valor de Terceiros (encargos de terceiros)
+- **VCIP**: Valor CIP (Contribuição para Iluminação Pública)
+
+**Cálculo do Aging (Tempo de Inadimplência):**
+```
+DA = DB - DV
+```
+Onde:
+- **DA**: Dias de Atraso
+- **DB**: Data Base de Cálculo
+- **DV**: Data de Vencimento Original
+
+**Cálculo da Multa Contratual:**
+```
+M = VL × 0,02 × I(DA > 0)
+```
+Onde:
+- **M**: Multa (2% sobre valor líquido)
+- **I(DA > 0)**: Função indicadora (1 se em atraso, 0 se não)
+
+**Cálculo dos Juros Moratórios:**
+```
+JM = VL × 0,01 × (DA / 30) × I(DA > 0)
+```
+Onde:
+- **JM**: Juros Moratórios (1% ao mês proporcional)
+- **DA / 30**: Conversão de dias para meses
+
+**Cálculo da Correção Monetária:**
+```
+CM = VL × (IDB / IDV - 1) × I(DA > 0)
+```
+Onde:
+- **CM**: Correção Monetária
+- **IDB**: Índice na Data Base (IGPM até mai/2021, IPCA após)
+- **IDV**: Índice na Data de Vencimento
 
 **Valor Corrigido Total:**
-```excel
-Valor Corrigido = Base Cálculo + Multa (2%) + Correção Monetária + Juros (1% a.m.)
+```
+VC = VL + M + JM + CM
 ```
 
 **Valor Recuperável:**
-```excel
-Valor Recuperável = Valor Corrigido × Taxa de Recuperação por Aging
 ```
+VR = VC × TR(E, T, A)
+```
+Onde:
+- **TR(E, T, A)**: Taxa de Recuperação função da Empresa, Tipo e Aging
 
 **Valor Justo (Presente):**
-```excel
-Valor Justo = Valor Recuperável ÷ (1 + Taxa Desconto)^(Prazo em Anos)
 ```
+VJ = VR ÷ (1 + TD)^(PR/365)
+```
+Onde:
+- **TD**: Taxa de Desconto (8% a 15% a.a.)
+- **PR**: Prazo de Recebimento em dias (específico por perfil)
+
+**Fórmula Consolidada do Sistema:**
+```
+VJ = [(VL + VL×0,02×I(DA>0) + VL×0,01×(DA/30)×I(DA>0) + VL×(IDB/IDV-1)×I(DA>0)) × TR(E,T,A)] ÷ (1+TD)^(PR/365)
+```
+
+#### 4. **Validações e Tratamento de Dados**
+
+**Tratamento de Dados Ausentes:**
+- Valores numéricos ausentes: Substituição por zero
+- Datas inválidas: Utilização de data base padrão
+- Índices não encontrados: Utilização de valores de fallback
+
+**Validações de Integridade:**
+- Garantia de que VL ≥ 0 (valores líquidos não negativos)
+- Validação de consistência temporal (datas futuras)
+- Verificação de disponibilidade de índices de correção
+- Aplicação condicional de encargos apenas para DA > 0
+
+**Verificações de Consistência:**
+- VC = VL + M + JM + CM (soma de componentes)
+- Encargos aplicados apenas para valores em atraso
+- Limites de sanidade para valores extremos
 
 ### Resultados Esperados
 
@@ -286,33 +397,66 @@ valor_justo = valor_recuperavel / (1 + taxa_desconto) ** (prazo_anos)
 ### Exemplo 1: Cliente Residencial
 
 **Dados de Entrada:**
-- Valor Principal: R$ 1.500,00
+- Valor Principal (VP): R$ 1.500,00
+- Valor Não Cedido (VNC): R$ 0,00
+- Valor Terceiros (VT): R$ 0,00
+- Valor CIP (VCIP): R$ 0,00
 - Data Vencimento: 15/01/2024
 - Data Base: 30/04/2025
 - Dias de Atraso: 470 dias
 - Aging: "De 360 a 719 dias"
 
-**Processamento:**
-1. **Correção Monetária**: R$ 1.500 × 1,12 = R$ 1.680,00
-2. **Multa**: R$ 1.500 × 2% = R$ 30,00
-3. **Juros**: R$ 1.500 × 1% × 15,67 meses = R$ 235,00
-4. **Valor Corrigido**: R$ 1.945,00
-5. **Taxa Recuperação**: 2% (segundo ano)
-6. **Valor Recuperável**: R$ 1.945 × 2% = R$ 38,90
-7. **Valor Justo**: R$ 38,90 ÷ (1,12)^1,5 = R$ 32,50
+**Processamento Matemático:**
+
+1. **Valor Líquido**: VL = 1.500 - 0 - 0 - 0 = R$ 1.500,00
+
+2. **Multa**: M = 1.500 × 0,02 × 1 = R$ 30,00
+
+3. **Juros Moratórios**: JM = 1.500 × 0,01 × (470/30) × 1 = R$ 235,00
+
+4. **Correção Monetária**: CM = 1.500 × (1,12 - 1) × 1 = R$ 180,00
+
+5. **Valor Corrigido**: VC = 1.500 + 30 + 235 + 180 = R$ 1.945,00
+
+6. **Taxa Recuperação**: 2% (segundo ano)
+
+7. **Valor Recuperável**: VR = 1.945 × 0,02 = R$ 38,90
+
+8. **Valor Justo**: VJ = 38,90 ÷ (1,12)^(548/365) = R$ 32,50
 
 **Resultado Final: R$ 32,50 (1,67% do valor corrigido)**
 
 ### Exemplo 2: Cliente Comercial
 
 **Dados de Entrada:**
-- Valor Principal: R$ 10.000,00
+- Valor Principal (VP): R$ 10.000,00
+- Valor Não Cedido (VNC): R$ 500,00
+- Valor Terceiros (VT): R$ 200,00
+- Valor CIP (VCIP): R$ 300,00
 - Data Vencimento: 20/12/2024
 - Data Base: 30/04/2025
 - Dias de Atraso: 130 dias
 - Aging: "De 120 a 359 dias"
 
-**Resultado Final: R$ 4.950,00 (45% do valor corrigido)**
+**Processamento Matemático:**
+
+1. **Valor Líquido**: VL = 10.000 - 500 - 200 - 300 = R$ 9.000,00
+
+2. **Multa**: M = 9.000 × 0,02 × 1 = R$ 180,00
+
+3. **Juros Moratórios**: JM = 9.000 × 0,01 × (130/30) × 1 = R$ 390,00
+
+4. **Correção Monetária**: CM = 9.000 × (1,05 - 1) × 1 = R$ 450,00
+
+5. **Valor Corrigido**: VC = 9.000 + 180 + 390 + 450 = R$ 10.020,00
+
+6. **Taxa Recuperação**: 47% (primeiro ano)
+
+7. **Valor Recuperável**: VR = 10.020 × 0,47 = R$ 4.709,40
+
+8. **Valor Justo**: VJ = 4.709,40 ÷ (1,12)^(180/365) = R$ 4.447,15
+
+**Resultado Final: R$ 4.447,15 (44,4% do valor corrigido)**
 
 ---
 
