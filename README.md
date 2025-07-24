@@ -29,7 +29,6 @@ O **Energisa Data Refactor Wizard** é uma aplicação Streamlit desenvolvida pa
 - **📈 Aging Inteligente**: Classificação temporal automática da inadimplência
 - **🔄 Correção Monetária**: Atualização por IGPM/IPCA
 - **📋 Relatórios Executivos**: Dashboards interativos e exportações Excel
-- **🔐 Segurança de Dados**: Integração com Supabase para armazenamento seguro
 
 ---
 
@@ -161,17 +160,7 @@ cd energisa-data-refactor-wizard
 pip install -r requirements.txt
 ```
 
-### 3. Configuração do Supabase (Opcional)
-
-Para habilitar o armazenamento em nuvem, configure as variáveis de ambiente:
-
-```bash
-# Crie um arquivo .streamlit/secrets.toml
-SUPABASE_URL = "sua_url_supabase"
-SUPABASE_ANON_KEY = "sua_chave_anonima"
-```
-
-### 4. Execução da Aplicação
+### 3. Execução da Aplicação
 
 ```bash
 streamlit run app.py
@@ -460,7 +449,6 @@ Desenvolvido por **Business Integration Partners (BIP)** para o Grupo **Energisa
 - Streamlit para interface web
 - Pandas para manipulação de dados
 - Plotly para visualizações
-- Supabase para armazenamento
 - SidraPI para índices econômicos
 
 ---

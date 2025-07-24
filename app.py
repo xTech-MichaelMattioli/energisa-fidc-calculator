@@ -20,25 +20,6 @@ from utils.calculador_aging import CalculadorAging
 from utils.calculador_correcao import CalculadorCorrecao
 from utils.exportador_resultados import ExportadorResultados
 
-# Configuração do Supabase
-try:
-    from supabase import create_client, Client
-    SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-    SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
-    
-    if SUPABASE_URL and SUPABASE_ANON_KEY:
-        supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        SUPABASE_ENABLED = True
-    else:
-        SUPABASE_ENABLED = False
-        st.warning("⚠️ Supabase não configurado. Downloads usarão método local.")
-except ImportError:
-    SUPABASE_ENABLED = False
-    st.warning("⚠️ Biblioteca Supabase não instalada. Downloads usarão método local.")
-except Exception as e:
-    SUPABASE_ENABLED = False
-    st.warning(f"⚠️ Erro ao conectar ao Supabase: {str(e)}")
-
 # Configuração da página
 st.set_page_config(
     page_title="FIDC Calculator - Distribuidoras",
@@ -95,27 +76,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-def upload_to_supabase(file_data, filename):
-    """
-    Helper function para upload de arquivos ao Supabase Storage
-    """
-    if not SUPABASE_ENABLED:
-        return None
-    
-    try:
-        # Upload do arquivo
-        result = supabase.storage.from_("fidc-files").upload(filename, file_data)
-        
-        if result:
-            # Gerar URL público
-            public_url = supabase.storage.from_("fidc-files").get_public_url(filename)
-            return public_url
-    except Exception as e:
-        st.error(f"Erro no upload: {str(e)}")
-        return None
-    
-    return None
 
 def main():
     # Header principal
@@ -198,8 +158,6 @@ def main():
         etapa_mapeamento()
     elif etapa.startswith("💰 4"):
         etapa_correcao()
-    elif etapa.startswith("📈 5"):
-        etapa_taxa_recuperacao()
 
 def etapa_configuracoes():
     """Etapa 1: Configurações e Parâmetros"""
