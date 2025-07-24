@@ -533,23 +533,6 @@ logging.basicConfig(level=logging.DEBUG)
 
 ---
 
-## 📈 Roadmap de Desenvolvimento
-
-### Versão 2.0 (Planejada)
-- [ ] API REST para integração sistemas
-- [ ] Machine Learning para otimização de taxas
-- [ ] Dashboard executivo em tempo real
-- [ ] Integração com sistemas SAP
-- [ ] Módulo de simulação de cenários
-
-### Versão 2.1 (Futuro)
-- [ ] App mobile para gestores
-- [ ] Relatórios automáticos por email
-- [ ] Integração com bancos de dados Oracle
-- [ ] Módulo de auditoria e compliance
-
----
-
 ## 🤝 Suporte e Contribuição
 
 ### Reportar Issues
@@ -572,14 +555,14 @@ Para reportar bugs ou sugerir melhorias:
 ### Contato da Equipe
 
 - **Desenvolvedor Principal**: Michael Mattioli
-- **Organização**: Business Integration Partners SPA
-- **Email**: [contato disponível via GitHub]
+- **Organização**: Business Integration Partners LTDA
+- **Email**: michael.mattioli@bip-group.com
 
 ---
 
 ## 📄 Licença
 
-Este projeto está licenciado sob os termos definidos pela Business Integration Partners SPA. Todos os direitos reservados.
+Este projeto está licenciado sob os termos definidos pela Business Integration Partners. Todos os direitos reservados.
 
 **Confidencialidade**: Este sistema contém metodologias proprietárias e deve ser usado exclusivamente para os fins autorizados pela Energisa S.A.
 
@@ -597,4 +580,4 @@ Desenvolvido por **Business Integration Partners (BIP)** para o Grupo **Energisa
 
 ---
 
-*© 2025 Business Integration Partners SPA | Desenvolvido para Energisa S.A.*
+*© 2025 Business Integration Partners  | Desenvolvido para Energisa S.A.*
