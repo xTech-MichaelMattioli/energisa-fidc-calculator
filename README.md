@@ -373,9 +373,9 @@ valor_justo = valor_recuperavel / (1 + taxa_desconto) ** (prazo_anos)
 | **Tipo** | Texto | ✅ | Classificação do cliente |
 | **COSIP** | Monetário | ❌ | Contribuição Iluminação Pública |
 | **Valores Terceiros** | Monetário | ❌ | Encargos de terceiros |
-| **Juros/Multa** | Monetário | ❌ | Encargos já aplicados |
-| **Status** | Texto | ❌ | Situação do contrato |
-| **Classe** | Numérico | ❌ | Categoria tarifária |
+| **Juros/Multa** | Monetário | ✅ | Encargos já aplicados |
+| **Status** | Texto | ✅ | Situação do contrato |
+| **Classe** | Numérico | ✅ | Categoria tarifária |
 
 ### Campos de Saída Gerados
 
