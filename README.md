@@ -1,4 +1,4 @@
-# 🔋 ENERGISA Data Refactor Wizard - Sistema de Análise FIDC
+# 🔋 ENERGISA FIDC Calculator - Sistema de Análise FIDC
 
 > **Sistema especializado para cálculo de valor justo de carteiras inadimplentes para Fundos de Investimento em Direitos Creditórios (FIDC) das distribuidoras Energisa**
 
@@ -20,7 +20,7 @@
 
 ## 🎯 Visão Geral
 
-O **Energisa Data Refactor Wizard** é uma aplicação Streamlit desenvolvida para automatizar e padronizar o processo de avaliação de carteiras inadimplentes das distribuidoras do Grupo Energisa, transformando ativos de baixa liquidez em valores precisos para negociação com Fundos de Investimento em Direitos Creditórios (FIDC).
+O **Energisa FIDC Calculator** é uma aplicação Streamlit desenvolvida para automatizar e padronizar o processo de avaliação de carteiras inadimplentes das distribuidoras do Grupo Energisa, transformando ativos de baixa liquidez em valores precisos para negociação com Fundos de Investimento em Direitos Creditórios (FIDC).
 
 ### ✨ Principais Funcionalidades
 
