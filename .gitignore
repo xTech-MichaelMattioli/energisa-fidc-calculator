@@ -26,6 +26,7 @@ dist-ssr
 
 .venv
 *.xlsx
+*.csv
 *.pdf
 *.ipynb
 /BASE_DADOS/

@@ -58,6 +58,295 @@ class ExportadorResultados:
         
         return resumo
     
+    def criar_dicionario_dados(self) -> pd.DataFrame:
+        """
+        Cria dicionário de dados com descrição de todas as colunas da base.
+        """
+        dicionario = {
+            'Campo': [
+                'id_padronizado',
+                'empresa',
+                'tipo',
+                'classe', 
+                'status',
+                'situacao',
+                'nome_cliente',
+                'documento',
+                'contrato',
+                'data_vencimento',
+                'valor_principal',
+                'valor_nao_cedido',
+                'valor_terceiro',
+                'valor_cip',
+                'valor_principal_limpo',
+                'valor_liquido',
+                'aging',
+                'aging_taxa',
+                'dias_atraso',
+                'taxa_multa_aplicada',
+                'taxa_juros_aplicada',
+                'multa',
+                'juros_moratorios',
+                'correcao_monetaria',
+                'valor_corrigido',
+                'valor_justo',
+                'valor_recuperavel'
+            ],
+            'Descricao': [
+                'Identificador único criado a partir do nome do cliente e data de vencimento',
+                'Nome da empresa/distribuidora (ESS, EMR, etc.)',
+                'Tipo de cliente ou débito',
+                'Classe do cliente (Residencial, Comercial, Industrial, etc.)',
+                'Status atual do débito',
+                'Situação específica do débito',
+                'Nome completo do cliente devedor',
+                'CPF ou CNPJ do cliente',
+                'Número do contrato ou unidade consumidora',
+                'Data de vencimento original da fatura',
+                'Valor principal da fatura original',
+                'Valor que não foi cedido ao FIDC',
+                'Valor relacionado a terceiros',
+                'Valor relacionado ao CIP (Conta de Irregularidades de Pagamento)',
+                'Valor principal após aplicação das regras de limpeza',
+                'Valor líquido = Principal Limpo - Não Cedido - Terceiro - CIP',
+                'Classificação de aging conforme metodologia FIDC',
+                'Taxa de recuperação associada ao aging',
+                'Número de dias em atraso desde o vencimento',
+                'Taxa de multa aplicada (configurável)',
+                'Taxa de juros moratórios aplicada (configurável)',
+                'Valor da multa calculada',
+                'Valor dos juros moratórios calculados',
+                'Valor da correção monetária (IGP-M até 2021.05, IPCA após)',
+                'Valor total corrigido = Valor Líquido + Multa + Juros + Correção',
+                'Valor justo = Valor Corrigido × Taxa de Recuperação do Aging',
+                'Valor recuperável final esperado conforme taxas de recuperação'
+            ],
+            'Tipo': [
+                'Texto',
+                'Texto',
+                'Texto',
+                'Texto',
+                'Texto',
+                'Texto',
+                'Texto',
+                'Texto',
+                'Texto',
+                'Data',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Texto',
+                'Percentual',
+                'Numérico',
+                'Percentual',
+                'Percentual',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Monetário',
+                'Monetário'
+            ],
+            'Obrigatorio': [
+                'Sim',
+                'Sim',
+                'Não',
+                'Não',
+                'Não',
+                'Não',
+                'Sim',
+                'Não',
+                'Não',
+                'Sim',
+                'Sim',
+                'Não',
+                'Não',
+                'Não',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim',
+                'Sim'
+            ]
+        }
+        
+        return pd.DataFrame(dicionario)
+    
+    def gerar_agrupamento_detalhado(self, df_consolidado):
+        """
+        Gera agrupamento detalhado por empresa, tipo, classe, status e situação.
+        """
+        if df_consolidado is None or df_consolidado.empty:
+            return pd.DataFrame()
+        
+        # Colunas para agrupamento
+        colunas_agrupamento = ['empresa', 'tipo', 'classe', 'status', 'situacao', 'aging', 'aging_taxa']
+        colunas_existentes = [col for col in colunas_agrupamento if col in df_consolidado.columns]
+        
+        if not colunas_existentes:
+            return pd.DataFrame()
+        
+        # Colunas para soma
+        colunas_valores = ['valor_liquido', 'valor_corrigido', 'multa', 'juros_moratorios', 'correcao_monetaria', 'valor_justo', 'valor_recuperavel']
+        colunas_valores_existentes = [col for col in colunas_valores if col in df_consolidado.columns]
+        
+        agrupado = (df_consolidado
+                   .groupby(colunas_existentes, dropna=False)
+                   .agg({
+                       'id_padronizado': 'count',
+                       **{col: 'sum' for col in colunas_valores_existentes}
+                   })
+                   .reset_index()
+                   .round(2))
+        
+        agrupado.rename(columns={'id_padronizado': 'qtd_registros'}, inplace=True)
+        
+        return agrupado
+    
+    def gerar_agrupamento_consolidado(self, df_consolidado):
+        """
+        Gera agrupamento consolidado por empresa e aging.
+        """
+        if df_consolidado is None or df_consolidado.empty:
+            return pd.DataFrame()
+        
+        colunas_agrupamento = ['empresa', 'aging', 'aging_taxa']
+        colunas_existentes = [col for col in colunas_agrupamento if col in df_consolidado.columns]
+        
+        if not colunas_existentes:
+            return pd.DataFrame()
+        
+        colunas_valores = ['valor_liquido', 'valor_corrigido', 'multa', 'juros_moratorios', 'correcao_monetaria', 'valor_justo', 'valor_recuperavel']
+        colunas_valores_existentes = [col for col in colunas_valores if col in df_consolidado.columns]
+        
+        agrupado = (df_consolidado
+                   .groupby(colunas_existentes, dropna=False)
+                   .agg({
+                       'id_padronizado': 'count',
+                       **{col: 'sum' for col in colunas_valores_existentes}
+                   })
+                   .reset_index()
+                   .round(2))
+        
+        agrupado.rename(columns={'id_padronizado': 'qtd_registros'}, inplace=True)
+        
+        return agrupado
+    
+    def gerar_agrupamento_geral(self, df_consolidado):
+        """
+        Gera agrupamento geral por aging e taxa de recuperação.
+        """
+        if df_consolidado is None or df_consolidado.empty:
+            return pd.DataFrame()
+        
+        colunas_agrupamento = ['aging', 'aging_taxa']
+        colunas_existentes = [col for col in colunas_agrupamento if col in df_consolidado.columns]
+        
+        if not colunas_existentes:
+            return pd.DataFrame()
+        
+        colunas_valores = ['valor_liquido', 'valor_corrigido', 'multa', 'juros_moratorios', 'correcao_monetaria', 'valor_justo', 'valor_recuperavel']
+        colunas_valores_existentes = [col for col in colunas_valores if col in df_consolidado.columns]
+        
+        agrupado = (df_consolidado
+                   .groupby(colunas_existentes, dropna=False)
+                   .agg({
+                       'id_padronizado': 'count',
+                       **{col: 'sum' for col in colunas_valores_existentes}
+                   })
+                   .reset_index()
+                   .round(2))
+        
+        agrupado.rename(columns={'id_padronizado': 'qtd_registros'}, inplace=True)
+        
+        # Calcular percentuais de participação
+        if 'valor_corrigido' in agrupado.columns:
+            total_valor_corrigido = agrupado['valor_corrigido'].sum()
+            if total_valor_corrigido > 0:
+                agrupado['participacao_perc'] = (agrupado['valor_corrigido'] / total_valor_corrigido * 100).round(2)
+        
+        return agrupado
+    
+    def criar_arquivo_excel_consolidado(self, df_consolidado) -> BytesIO:
+        """
+        Cria arquivo Excel com as 5 abas solicitadas:
+        1. Dicionário de Dados
+        2. Dados Consolidados (sem agregação)
+        3. Agrupamento Detalhado
+        4. Agrupamento Consolidado  
+        5. Agrupamento Geral
+        """
+        output = BytesIO()
+        
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            
+            # Aba 1: Dicionário de Dados
+            df_dicionario = self.criar_dicionario_dados()
+            df_dicionario.to_excel(writer, sheet_name='1_Dicionario_Dados', index=False)
+            st.success(f"✅ Aba 1: Dicionário de Dados - {len(df_dicionario)} campos")
+            
+            # Aba 2: Dados Consolidados (sem agregação)
+            if df_consolidado is not None and not df_consolidado.empty:
+                df_consolidado.to_excel(writer, sheet_name='2_Dados_Consolidados', index=False)
+                st.success(f"✅ Aba 2: Dados Consolidados - {len(df_consolidado):,} registros")
+                
+                # Aba 3: Agrupamento Detalhado
+                agrupamento_detalhado = self.gerar_agrupamento_detalhado(df_consolidado)
+                if not agrupamento_detalhado.empty:
+                    agrupamento_detalhado.to_excel(writer, sheet_name='3_Agrupamento_Detalhado', index=False)
+                    st.success(f"✅ Aba 3: Agrupamento Detalhado - {len(agrupamento_detalhado):,} grupos")
+                
+                # Aba 4: Agrupamento Consolidado
+                agrupamento_consolidado = self.gerar_agrupamento_consolidado(df_consolidado)
+                if not agrupamento_consolidado.empty:
+                    agrupamento_consolidado.to_excel(writer, sheet_name='4_Agrupamento_Consolidado', index=False)
+                    st.success(f"✅ Aba 4: Agrupamento Consolidado - {len(agrupamento_consolidado):,} grupos")
+                
+                # Aba 5: Agrupamento Geral
+                agrupamento_geral = self.gerar_agrupamento_geral(df_consolidado)
+                if not agrupamento_geral.empty:
+                    agrupamento_geral.to_excel(writer, sheet_name='5_Agrupamento_Geral', index=False)
+                    st.success(f"✅ Aba 5: Agrupamento Geral - {len(agrupamento_geral):,} grupos")
+            
+            # Aba adicional: Parâmetros utilizados
+            params_data = {
+                'Parametro': [
+                    'Taxa de Multa',
+                    'Taxa de Juros Moratórios',
+                    'Data de Processamento',
+                    'Metodologia IGP-M',
+                    'Metodologia IPCA',
+                    'Fonte dos Dados IGPM',
+                    'Aging - Critério'
+                ],
+                'Valor': [
+                    f"{self.params.taxa_multa:.2%}",
+                    f"{self.params.taxa_juros_mensal:.2%} ao mês",
+                    datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
+                    'Até 2021.05',
+                    'A partir de 2021.06',
+                    'SIDRA/IBGE',
+                    'Baseado em dias de atraso'
+                ]
+            }
+            df_params = pd.DataFrame(params_data)
+            df_params.to_excel(writer, sheet_name='Parametros', index=False)
+            st.success("✅ Aba Parâmetros")
+        
+        output.seek(0)
+        return output
+
     def criar_arquivo_excel(self, df_ess=None, df_voltz=None) -> BytesIO:
         """
         Cria arquivo Excel em memória com múltiplas abas.
