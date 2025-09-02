@@ -1,12 +1,14 @@
 """
 Calculador de aging (tempo de inadimplência)
 Baseado no notebook original
+COM CHECKPOINT: Sistema inteligente de cache para evitar reprocessamento
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import streamlit as st
+from .checkpoint_manager import usar_checkpoint
 
 
 class CalculadorAging:
@@ -85,7 +87,7 @@ class CalculadorAging:
             return 'De 720 a 1080 dias'
         else:
             return 'Maior que 1080 dias'
-    
+
     def aplicar_classificacao_aging(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Aplica classificação de aging para todo o DataFrame.
@@ -101,11 +103,26 @@ class CalculadorAging:
     def processar_aging_completo(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Executa todo o processo de cálculo de aging.
+        COM CHECKPOINT: Evita reprocessamento se dados não mudaram.
         """
         if df.empty:
             st.warning("⚠️ DataFrame vazio - não é possível calcular aging")
             return df
         
+        return usar_checkpoint(
+            checkpoint_name="aging_completo",
+            funcao_processamento=self._processar_aging_completo_interno,
+            dataframes={"df_principal": df},
+            parametros={
+                "data_base": self.params.data_base.isoformat() if hasattr(self.params, 'data_base') else None
+            },
+            df=df
+        )
+    
+    def _processar_aging_completo_interno(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Implementação interna do processamento de aging (sem checkpoint)
+        """
         # Calcular dias de atraso
         df = self.calcular_dias_atraso(df)
         

@@ -91,6 +91,7 @@ def show():
             mapeamento_manual = mapeador.permitir_mapeamento_manual(
                 df_arquivo, 
                 mapeamento_inicial,
+                nome_arquivo,  # Passar nome do arquivo para detecção VOLTZ
                 key_suffix=f"_{nome_arquivo.replace('.', '_').replace(' ', '_')}"
             )
             
@@ -129,7 +130,7 @@ def show():
         st.success(f"✅ Todos os {total_arquivos} mapeamentos foram salvos!")
     
     # Botão para aplicar todos os mapeamentos
-    if st.button("🚀 Aplicar Todos os Mapeamentos", type="primary"):
+    if st.button("🚀 Aplicar Todos os Mapeamentos", type="primary", key="aplicar_todos_mapeamentos"):
         if not st.session_state.mapeamentos_finais:
             st.error("❌ Nenhum mapeamento foi salvo. Salve pelo menos um mapeamento antes de prosseguir.")
             return
@@ -159,18 +160,148 @@ def show():
                     if len(dataframes_padronizados) == 1:
                         # Apenas um arquivo
                         df_final_padronizado = list(dataframes_padronizados.values())[0]
+                        nome_arquivo_unico = list(dataframes_padronizados.keys())[0]
                     else:
                         # Múltiplos arquivos - combinar
                         df_final_padronizado = pd.concat(
                             dataframes_padronizados.values(), 
                             ignore_index=True
                         )
+                        nome_arquivo_unico = None
+                    
+                    # ========== VERIFICAÇÃO DE DUPLICATAS ESPECÍFICA PARA VOLTZ ==========
+                    st.info("🔍 Verificando duplicatas...")
+                    
+                    # Detectar se é VOLTZ
+                    eh_voltz = False
+                    if nome_arquivo_unico:
+                        # Um único arquivo - verificar se é VOLTZ
+                        eh_voltz = 'VOLTZ' in nome_arquivo_unico.upper()
+                    else:
+                        # Múltiplos arquivos - verificar se algum é VOLTZ
+                        eh_voltz = any('VOLTZ' in nome.upper() for nome in dataframes_padronizados.keys())
+                    
+                    registros_antes = len(df_final_padronizado)
+                    
+                    if eh_voltz:
+                        st.info("⚡ **VOLTZ detectado** - Usando critério específico: nome + data_vencimento + documento")
+                        
+                        # Verificar se temos as colunas necessárias para VOLTZ
+                        colunas_voltz = ['nome_cliente', 'data_vencimento', 'documento']
+                        colunas_disponiveis = [col for col in colunas_voltz if col in df_final_padronizado.columns]
+                        
+                        if len(colunas_disponiveis) >= 2:  # Pelo menos 2 das 3 colunas
+                            # Criar chave de duplicata usando as colunas disponíveis
+                            colunas_para_duplicata = []
+                            
+                            if 'nome_cliente' in df_final_padronizado.columns:
+                                colunas_para_duplicata.append('nome_cliente')
+                                # Limpar e padronizar nome de forma mais rigorosa para VOLTZ
+                                df_final_padronizado['nome_cliente_limpo'] = (
+                                    df_final_padronizado['nome_cliente']
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    .str.replace(r'\s+', ' ', regex=True)
+                                    .str.replace(r'[^\w\s]', '', regex=True)  # Remove pontuação
+                                    .str.replace(r'\b(LTDA|S\.?A\.?|ME|EPP|EIRELI)\b', '', regex=True)  # Remove sufixos empresariais
+                                    .str.strip()
+                                )
+                                colunas_para_duplicata.append('nome_cliente_limpo')
+                            
+                            if 'data_vencimento' in df_final_padronizado.columns:
+                                # Padronizar data de vencimento
+                                df_final_padronizado['data_vencimento_limpa'] = pd.to_datetime(
+                                    df_final_padronizado['data_vencimento'], 
+                                    errors='coerce'
+                                ).dt.date
+                                colunas_para_duplicata.append('data_vencimento_limpa')
+                            
+                            if 'documento' in df_final_padronizado.columns:
+                                # Limpar e padronizar documento (CPF/CNPJ)
+                                df_final_padronizado['documento_limpo'] = (
+                                    df_final_padronizado['documento']
+                                    .astype(str)
+                                    .str.replace(r'[^\d]', '', regex=True)
+                                    .str.strip()
+                                )
+                                colunas_para_duplicata.append('documento_limpo')
+                            
+                            # Usar apenas as colunas relevantes (remover as auxiliares do subset)
+                            subset_final = ['nome_cliente_limpo'] if 'nome_cliente_limpo' in colunas_para_duplicata else []
+                            if 'data_vencimento_limpa' in colunas_para_duplicata:
+                                subset_final.append('data_vencimento_limpa')
+                            if 'documento_limpo' in colunas_para_duplicata:
+                                subset_final.append('documento_limpo')
+                            
+                            if subset_final:
+                                # VOLTZ: Não remover duplicatas - manter todos os registros
+                                # Apenas limpar colunas auxiliares
+                                colunas_auxiliares = ['nome_cliente_limpo', 'data_vencimento_limpa', 'documento_limpo']
+                                df_final_padronizado = df_final_padronizado.drop(
+                                    columns=[col for col in colunas_auxiliares if col in df_final_padronizado.columns]
+                                )
+                                
+                                st.success("✅ **VOLTZ**: Todos os registros mantidos (duplicatas não removidas)")
+                            else:
+                                st.warning("⚠️ **VOLTZ**: Colunas necessárias não encontradas para verificação de duplicatas")
+                        else:
+                            st.warning(f"⚠️ **VOLTZ**: Apenas {len(colunas_disponiveis)} de 3 colunas necessárias encontradas: {colunas_disponiveis}")
+                    else:
+                        st.info("📊 **Distribuidora padrão** - Usando critério padrão de duplicatas")
+                        
+                        # Verificação padrão de duplicatas para outras distribuidoras
+                        # Usar critério mais abrangente: nome + valor_principal + data_vencimento
+                        colunas_padrao = []
+                        
+                        if 'nome_cliente' in df_final_padronizado.columns:
+                            df_final_padronizado['nome_cliente_limpo'] = (
+                                df_final_padronizado['nome_cliente']
+                                .astype(str).str.strip().str.upper()
+                            )
+                            colunas_padrao.append('nome_cliente_limpo')
+                        
+                        if 'valor_principal' in df_final_padronizado.columns:
+                            colunas_padrao.append('valor_principal')
+                        
+                        if 'data_vencimento' in df_final_padronizado.columns:
+                            df_final_padronizado['data_vencimento_limpa'] = pd.to_datetime(
+                                df_final_padronizado['data_vencimento'], 
+                                errors='coerce'
+                            ).dt.date
+                            colunas_padrao.append('data_vencimento_limpa')
+                        
+                        if len(colunas_padrao) >= 2:
+                            df_final_padronizado = df_final_padronizado.drop_duplicates(
+                                subset=colunas_padrao, 
+                                keep='first'
+                            ).reset_index(drop=True)
+                            
+                            # Limpar colunas auxiliares
+                            colunas_auxiliares = ['nome_cliente_limpo', 'data_vencimento_limpa']
+                            df_final_padronizado = df_final_padronizado.drop(
+                                columns=[col for col in colunas_auxiliares if col in df_final_padronizado.columns]
+                            )
+                            
+                            registros_depois = len(df_final_padronizado)
+                            duplicatas_removidas = registros_antes - registros_depois
+                            
+                            if duplicatas_removidas > 0:
+                                st.warning(f"⚠️ **Padrão**: {duplicatas_removidas:,} duplicatas removidas")
+                            else:
+                                st.success("✅ **Padrão**: Nenhuma duplicata encontrada")
+                        else:
+                            st.info("ℹ️ Verificação de duplicatas não aplicada - colunas insuficientes")
                     
                     # Salvar resultado
                     st.session_state.df_padronizado = df_final_padronizado
                     st.session_state.dataframes_individuais = dataframes_padronizados
                     
-                    st.success(f"🎯 **Mapeamento concluído!** {total_registros_processados:,} registros de {len(dataframes_padronizados)} arquivo(s) padronizados")
+                    st.success(f"🎯 **Mapeamento e verificação de duplicatas concluídos!** {len(df_final_padronizado):,} registros finais de {len(dataframes_padronizados)} arquivo(s)")
+                    
+                    if registros_antes != len(df_final_padronizado):
+                        duplicatas_removidas = registros_antes - len(df_final_padronizado)
+                        st.info(f"📊 Registros processados: {registros_antes:,} → {len(df_final_padronizado):,} (removidas {duplicatas_removidas:,} duplicatas)")
                     
                     # Mostrar preview do resultado final
                     st.subheader("📊 Preview dos Dados Padronizados Consolidados")
@@ -190,12 +321,25 @@ def show():
                     # Preview da tabela consolidada
                     st.dataframe(df_final_padronizado.head(10), use_container_width=True)
                     
-                    # Validação final
+                    # Validação final considerando VOLTZ
                     problemas = []
                     campos_obrigatorios_validacao = ['empresa', 'tipo', 'status', 'situacao', 'nome_cliente', 'classe', 'contrato', 'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip', 'data_vencimento']
                     
+                    # Verificar se algum arquivo é VOLTZ para ajustar validação
+                    tem_voltz = False
+                    campos_automaticos_voltz = []
+                    if hasattr(mapeador, 'identificar_tipo_distribuidora'):
+                        for nome_arquivo in arquivos_processados.keys():
+                            if mapeador.identificar_tipo_distribuidora(nome_arquivo) == "VOLTZ":
+                                tem_voltz = True
+                                campos_automaticos_voltz = ['empresa', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip']
+                                break
+                    
                     for campo in campos_obrigatorios_validacao:
                         if campo not in df_final_padronizado.columns:
+                            # Para VOLTZ, alguns campos são adicionados automaticamente
+                            if campo in campos_automaticos_voltz and tem_voltz:
+                                continue
                             problemas.append(f"❌ Campo {campo.replace('_', ' ').title()} não identificado")
                     
                     if problemas:

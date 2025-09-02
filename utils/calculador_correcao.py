@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import streamlit as st
+from .calculador_voltz import CalculadorVoltz
 
 
 class CalculadorCorrecao:
@@ -16,6 +17,30 @@ class CalculadorCorrecao:
     
     def __init__(self, params):
         self.params = params
+        # Inicializar calculador específico da Voltz
+        self.calculador_voltz = CalculadorVoltz(params)
+    
+    def identificar_distribuidora(self, nome_arquivo: str) -> str:
+        """
+        Identifica o tipo de distribuidora baseado no nome do arquivo.
+        """
+        if self.calculador_voltz.identificar_voltz(nome_arquivo):
+            return "VOLTZ"
+        else:
+            return "PADRAO"
+    
+    def processar_com_regras_especificas(self, df: pd.DataFrame, nome_base: str, df_taxa_recuperacao: pd.DataFrame = None) -> pd.DataFrame:
+        """
+        Processa correção com regras específicas baseado no tipo de distribuidora.
+        """
+        tipo_distribuidora = self.identificar_distribuidora(nome_base)
+        
+        if tipo_distribuidora == "VOLTZ":
+            st.success("⚡ **VOLTZ detectada!** Aplicando regras específicas para Fintech/CCBs")
+            return self.calculador_voltz.processar_correcao_voltz_completa(df, nome_base, df_taxa_recuperacao)
+        else:
+            st.info("🏢 **Distribuidora padrão** - Aplicando regras convencionais")
+            return self.processar_correcao_completa_com_recuperacao(df, nome_base, df_taxa_recuperacao)
     
     def limpar_e_converter_valor(self, serie_valor: pd.Series) -> pd.Series:
         """
@@ -248,22 +273,31 @@ class CalculadorCorrecao:
         with st.spinner("🔄 Aplicando taxas de recuperação..."):
             df = df.copy()
             
+            # Remover registros onde empresa é None ou vazia
+            registros_antes = len(df)
+            df = df.dropna(subset=['empresa'])  # Remove linhas onde empresa é NaN/None
+            df = df[df['empresa'].str.strip() != '']  # Remove linhas onde empresa é string vazia
+            registros_depois = len(df)
+            
+            if registros_antes != registros_depois:
+                registros_removidos = registros_antes - registros_depois
+                st.warning(f"⚠️ Removidos {registros_removidos:,} registros sem empresa válida")
+            
+            if df.empty:
+                st.error("❌ Nenhum registro válido após remoção de empresas vazias")
+                return df
+            
             # Mapear aging detalhado para categorias de taxa
             df['aging_taxa'] = df['aging'].apply(self.mapear_aging_para_taxa)
             
             # Fazer merge com dados de taxa de recuperação
             # Chaves: Empresa, Tipo, Aging (mapeado)
-            
-
             df_merged = df.merge(
                 df_taxa_recuperacao,
                 left_on=['empresa', 'tipo', 'aging_taxa'],
                 right_on=['Empresa', 'Tipo', 'Aging'],
                 how='left'
             )
-            # st.dataframe(df[['empresa', 'tipo', 'aging_taxa']].drop_duplicates(), use_container_width=True)
-            # st.dataframe(df_taxa_recuperacao[['Empresa', 'Tipo', 'Aging']].drop_duplicates(), use_container_width=True)
-            # st.dataframe(df_merged, use_container_width=True)
             
             # Preencher valores não encontrados
             df_merged['Taxa de recuperação'] = df_merged['Taxa de recuperação'].fillna(0.0)
@@ -356,5 +390,71 @@ class CalculadorCorrecao:
         else:
             # Gerar resumo padrão
             self.gerar_resumo_correcao(df, nome_base)
+        
+        return df
+    
+    def calcular_valor_justo_reajustado(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcula valor justo reajustado aplicando descontos por faixa de aging.
+        
+        Descontos por aging:
+        - A vencer: 6,5%
+        - Menor que 30 dias: 6,5%
+        - De 31 a 59 dias: 6,5%
+        - De 60 a 89 dias: 6,5%
+        - De 90 a 119 dias: 8,0%
+        - De 120 a 359 dias: 15,0%
+        - De 360 a 719 dias: 22,0%
+        - De 720 a 1080 dias: 36,0%
+        - Maior que 1080 dias: 50,0%
+        """
+        if df.empty:
+            return df
+        
+        # Verificar se temos valor_justo
+        if 'valor_justo' not in df.columns:
+            st.warning("⚠️ Coluna 'valor_justo' não encontrada. Calculando valor justo reajustado apenas com valor corrigido.")
+            df['valor_justo'] = df.get('valor_corrigido', 0)
+        
+        df = df.copy()
+        
+        # Dicionário de descontos por aging
+        descontos_aging = {
+            'A vencer': 0.065,                    # 6,5%
+            'Menor que 30 dias': 0.065,          # 6,5%
+            'De 31 a 59 dias': 0.065,            # 6,5%
+            'De 60 a 89 dias': 0.065,            # 6,5%
+            'De 90 a 119 dias': 0.080,           # 8,0%
+            'De 120 a 359 dias': 0.150,          # 15,0%
+            'De 360 a 719 dias': 0.220,          # 22,0%
+            'De 720 a 1080 dias': 0.360,         # 36,0%
+            'Maior que 1080 dias': 0.500         # 50,0% (Maior que 1080)
+        }
+        
+        # Mapear desconto para cada registro
+        df['desconto_aging_perc'] = df['aging'].map(descontos_aging).fillna(0.0)
+        
+        # Calcular valor do desconto
+        df['desconto_aging_valor'] = df['valor_justo'] * df['desconto_aging_perc']
+        
+        # Calcular valor justo reajustado (valor justo - desconto)
+        df['valor_justo_reajustado'] = df['valor_justo'] - df['desconto_aging_valor']
+        
+        # Garantir que não seja negativo
+        df['valor_justo_reajustado'] = np.maximum(df['valor_justo_reajustado'], 0)
+        
+        with st.spinner("💎 Calculando valor justo reajustado..."):
+            total_valor_justo = df['valor_justo'].sum()
+            total_desconto = df['desconto_aging_valor'].sum()
+            total_reajustado = df['valor_justo_reajustado'].sum()
+            percentual_desconto = (total_desconto / total_valor_justo) * 100 if total_valor_justo > 0 else 0
+            
+            st.success(f"✅ Valor justo reajustado calculado!")
+            st.info(f"""
+            **💎 Resumo do Reajuste:**
+            - **Valor Justo Original:** R$ {total_valor_justo:,.2f}
+            - **Total de Descontos:** R$ {total_desconto:,.2f} ({percentual_desconto:.1f}%)
+            - **Valor Justo Reajustado:** R$ {total_reajustado:,.2f}
+            """)
         
         return df

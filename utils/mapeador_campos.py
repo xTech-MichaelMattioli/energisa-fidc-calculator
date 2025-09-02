@@ -18,6 +18,18 @@ class MapeadorCampos:
     
     def __init__(self, params):
         self.params = params
+        # Importar calculador VOLTZ para detecção
+        from .calculador_voltz import CalculadorVoltz
+        self.calculador_voltz = CalculadorVoltz(params)
+    
+    def identificar_tipo_distribuidora(self, nome_arquivo: str) -> str:
+        """
+        Identifica se é VOLTZ ou distribuidora padrão.
+        """
+        if self.calculador_voltz.identificar_voltz(nome_arquivo):
+            return "VOLTZ"
+        else:
+            return "PADRAO"
     
     def criar_mapeamento_automatico(self, df: pd.DataFrame, nome_distribuidora: str) -> Dict[str, str]:
         """
@@ -92,10 +104,14 @@ class MapeadorCampos:
         
         return mapeamento
     
-    def permitir_mapeamento_manual(self, df: pd.DataFrame, mapeamento_auto: Dict[str, str], key_suffix: str = "") -> Dict[str, str]:
+    def permitir_mapeamento_manual(self, df: pd.DataFrame, mapeamento_auto: Dict[str, str], nome_arquivo: str, key_suffix: str = "") -> Dict[str, str]:
         """
         Permite ajuste manual do mapeamento via interface Streamlit.
+        Para VOLTZ, alguns campos são preenchidos automaticamente.
         """
+        
+        # Detectar tipo de distribuidora
+        tipo_distribuidora = self.identificar_tipo_distribuidora(nome_arquivo)
         
         # Campos padrão que precisamos mapear
         campos_padrao = [
@@ -104,10 +120,36 @@ class MapeadorCampos:
             'data_vencimento', 'empresa', 'tipo', 'status'
         ]
         
+        # Para VOLTZ, remover campos que são preenchidos automaticamente
+        if tipo_distribuidora == "VOLTZ":
+            st.success("⚡ **VOLTZ detectada!** Campos específicos serão preenchidos automaticamente:")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("✅ **empresa** → 'VOLTZ'")
+                st.write("✅ **valor_nao_cedido** → 0")
+            with col2:
+                st.write("✅ **valor_terceiro** → 0") 
+                st.write("✅ **valor_cip** → 0")
+            
+            # Remover campos automáticos da lista de mapeamento manual
+            campos_automaticos = ['empresa', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip']
+            campos_padrao = [campo for campo in campos_padrao if campo not in campos_automaticos]
+        
         mapeamento_final = {}
+        
+        # Para VOLTZ, adicionar campos automáticos
+        if tipo_distribuidora == "VOLTZ":
+            mapeamento_final['empresa'] = None  # Será preenchido automaticamente
+            mapeamento_final['valor_nao_cedido'] = None  # Será preenchido como 0
+            mapeamento_final['valor_terceiro'] = None   # Será preenchido como 0
+            mapeamento_final['valor_cip'] = None        # Será preenchido como 0
         
         # Criar selectbox para cada campo padrão
         colunas_disponiveis = ['[Não mapear]'] + list(df.columns)
+        
+        st.markdown("---")
+        st.subheader("🗺️ Mapeamento Manual de Campos")
         
         col1, col2 = st.columns(2)
         
@@ -121,37 +163,76 @@ class MapeadorCampos:
             container = col1 if i % 2 == 0 else col2
             
             with container:
+                # Verificar se campo não foi mapeado
+                is_not_mapped = valor_padrao == '[Não mapear]'
+                
+                # Criar label com indicação visual (apenas emojis, sem fundo colorido)
+                if is_not_mapped:
+                    label = f"🔴 **{campo.replace('_', ' ').title()}** ⚠️"
+                    help_text = "⚠️ Campo obrigatório não encontrado automaticamente - selecione a coluna correspondente"
+                else:
+                    label = f"✅ **{campo.replace('_', ' ').title()}**"
+                    help_text = f"Mapeado automaticamente para: {valor_padrao}"
+                
                 coluna_selecionada = st.selectbox(
-                    f"**{campo.replace('_', ' ').title()}**",
+                    label,
                     options=colunas_disponiveis,
                     index=colunas_disponiveis.index(valor_padrao),
-                    key=f"map_{campo}{key_suffix}"
+                    key=f"map_{campo}{key_suffix}",
+                    help=help_text
                 )
                 
                 if coluna_selecionada != '[Não mapear]':
                     mapeamento_final[campo] = coluna_selecionada
+        
+        # Resumo do mapeamento
+        st.markdown("---")
+        campos_mapeados = len([v for v in mapeamento_final.values() if v is not None])
+        campos_automaticos = len([v for v in mapeamento_final.values() if v is None])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("✅ Campos Mapeados", campos_mapeados)
+        with col2:
+            st.metric("⚡ Campos Automáticos", campos_automaticos)
+        with col3:
+            st.metric("📊 Total", campos_mapeados + campos_automaticos)
         
         return mapeamento_final
     
     def aplicar_mapeamento(self, df: pd.DataFrame, mapeamento: Dict[str, str], nome_distribuidora: str) -> pd.DataFrame:
         """
         Aplica mapeamento criando DataFrame padronizado.
+        Para VOLTZ, adiciona automaticamente campos específicos.
         """
         if df.empty or not mapeamento:
             return pd.DataFrame()
         
         st.subheader(f"🔄 Aplicando Mapeamento - {nome_distribuidora}")
         
+        # Detectar tipo de distribuidora
+        tipo_distribuidora = self.identificar_tipo_distribuidora(nome_distribuidora)
+        
         df_padronizado = pd.DataFrame()
         
         # Aplicar mapeamentos disponíveis
         campos_mapeados = 0
         for campo_padrao, campo_original in mapeamento.items():
-            if campo_original in df.columns:
+            if campo_original is not None and campo_original in df.columns:
                 df_padronizado[campo_padrao] = df[campo_original]
                 campos_mapeados += 1
-            else:
+            elif campo_original is not None:
                 st.warning(f"⚠️ Campo {campo_original} não encontrado")
+        
+        # Para VOLTZ, adicionar campos automáticos
+        if tipo_distribuidora == "VOLTZ":
+            df_padronizado['empresa'] = "VOLTZ"
+            df_padronizado['valor_nao_cedido'] = 0
+            df_padronizado['valor_terceiro'] = 0
+            df_padronizado['valor_cip'] = 0
+            campos_mapeados += 4
+            
+            st.success("⚡ Campos VOLTZ preenchidos automaticamente:")
         
         if campos_mapeados > 0:
             # Criar ID padronizado único

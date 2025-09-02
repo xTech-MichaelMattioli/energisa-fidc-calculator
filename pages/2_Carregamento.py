@@ -51,7 +51,7 @@ def show():
         # Botão de confirmação para processar
         st.markdown("---")
         
-        if st.button("🔄 Confirmar e Processar Todos os Arquivos", type="primary"):
+        if st.button("🔄 Confirmar e Processar Todos os Arquivos", type="primary", key="confirmar_processar_arquivos"):
             st.session_state.processamento_confirmado = True
             st.rerun()
     

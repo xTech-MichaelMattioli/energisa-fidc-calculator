@@ -1,15 +1,32 @@
-# FIDC Calculator - Energisa 
+# FIDC Calculator - Energisa Data Refactor Wizard
 
-⚡ Sistema de Cálculo de Valor Justo para Distribuidoras
+## 🚀 Visão Geral
 
-## 🚀 Nova Estrutura Modular
+Sistema avançado para processamento e cálculo de correção monetária de bases de dados de distribuidoras de energia, com **sistema diferenciado para VOLTZ** (Fintech).
 
-### Como executar a nova versão:
+## ⚡ **NOVA FUNCIONALIDADE: Sistema VOLTZ**
+
+### 🎯 Detecção Automática
+O sistema agora **detecta automaticamente** arquivos da VOLTZ e aplica regras específicas:
+- **Identificação:** Arquivos com "voltz" ou "volt" no nome
+- **Processamento:** Regras diferenciadas para contratos CCBs
+- **Transparência:** Notificação clara das regras aplicadas
+
+### � Regras Específicas VOLTZ
+- **Juros Remuneratórios:** 4,65% a.m. até vencimento
+- **Correção Monetária:** Sempre IGP-M (nunca IPCA)
+- **Multa:** 2% sobre saldo devedor no vencimento (apenas vencidos)
+- **Juros Moratórios:** 1,0% a.m. sobre valor no vencimento
+- **Taxa de Recuperação:** Específica para contratos CCBs
+
+## 📋 Como Executar
+
+### Versão Atual (com VOLTZ):
 ```bash
 streamlit run main.py
 ```
 
-### Como executar a versão legada:
+### Versão Legada:
 ```bash
 streamlit run app.py
 ```
@@ -21,7 +38,6 @@ energisa-data-refactor-wizard/
 ├── main.py                          # 🏠 Página principal (NOVA VERSÃO)
 ├── app.py                           # 📜 Aplicação legada (monolítica)
 ├── pages/                           # 📄 Páginas separadas
-│   ├── 1_📋_Configurações.py       # Parâmetros e índices
 │   ├── 2_📂_Carregamento.py        # Upload de arquivos Excel
 │   ├── 3_🗺️_Mapeamento.py         # Mapeamento de campos
 │   └── 4_💰_Correção.py            # Correção monetária e valor justo
@@ -60,24 +76,19 @@ energisa-data-refactor-wizard/
 
 ## 🧭 Fluxo do Processo
 
-### 1. 📋 Configurações
-- Definir parâmetros financeiros (multa, juros)
-- Visualizar índices de correção (IGP-M, IPCA)
-- Configurar data base padrão
-
-### 2. 📂 Carregamento
+### 1.  Carregamento
 - Upload de múltiplos arquivos Excel
 - Detecção automática de estrutura
 - Identificação de data base
 - Validação de formato
 
-### 3. 🗺️ Mapeamento
+### 2. 🗺️ Mapeamento
 - Mapeamento automático de campos
 - Ajuste manual quando necessário
 - Validação de campos obrigatórios
 - Preview dos dados padronizados
 
-### 4. 💰 Correção
+### 3. 💰 Correção
 - **Upload obrigatório** da taxa de recuperação
 - Cálculo automático de aging
 - Correção monetária com IGP-M

@@ -98,10 +98,9 @@ def main():
     monetariamente com aplicação de IPCA e taxas de recuperação.
     
     **Fluxo do processo:**
-    1. 📋 **Configurações** - Definir parâmetros financeiros e índices
-    2. 📂 **Carregamento** - Upload e análise dos arquivos Excel
-    3. 🗺️ **Mapeamento** - Mapeamento automático e manual de campos
-    4. 💰 **Correção** - Cálculo de aging, correção monetária e valor justo
+    1.  **Carregamento** - Upload e análise dos arquivos Excel
+    2. 🗺️ **Mapeamento** - Mapeamento automático e manual de campos
+    3. 💰 **Correção** - Cálculo de aging, correção monetária e valor justo
     
     **👈 Use a navegação na barra lateral para acessar cada etapa.**
     """)
