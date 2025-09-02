@@ -387,7 +387,7 @@ class CalculadorValorJusto:
         
         # Verificar se temos coluna prazo_recebimento, senão usar 6 meses como padrão
         if 'prazo_recebimento' not in df_resultado.columns:
-            df_resultado['prazo_recebimento'] = 24
+            df_resultado['prazo_recebimento'] = 6  # Padrão 6 meses
         
         # Inicializar colunas para DI-PRE
         df_resultado['taxa_di_pre'] = 0.0
@@ -713,7 +713,7 @@ def show():
         # Mostrar o head dos dados num expander
         with st.expander("📊 Preview dos Dados de Taxa de Recuperação", expanded=False):
             if 'df_taxa_recuperacao' in st.session_state:
-                st.dataframe(st.session_state.df_taxa_recuperacao.head(10), use_container_width=True)
+                st.dataframe(st.session_state.df_taxa_recuperacao, use_container_width=True)
 
     st.markdown("---")
     
@@ -969,6 +969,8 @@ def show():
                 nome_arquivo_original = primeiro_arquivo
             
             etapa_inicio = time.time()
+
+            
             
             # Usar o novo método que detecta automaticamente VOLTZ vs Padrão
             df_final_temp = calc_correcao.processar_com_regras_especificas(

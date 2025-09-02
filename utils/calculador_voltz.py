@@ -4,7 +4,7 @@ Sistema de cálculo diferenciado para contratos CCBs com regras específicas
 
 🚀 OTIMIZAÇÕES ULTRA-AVANÇADAS DE PERFORMANCE IMPLEMENTADAS:
 ✅ calcular_correcao_monetaria_igpm(): Loop O(n) → merge_asof O(log n) + operações vetorizadas
-✅ calcular_juros_remuneratorios_ate_vencimento(): Pandas datetime → NumPy timestamp vetorizado
+✅ calcular_juros_remuneratorios_ate_vencimento(): Definição direta do saldo (juros já inclusos no valor)
 ✅ identificar_status_contrato(): Operações timestamp NumPy puras para máxima velocidade  
 ✅ calcular_valor_corrigido_voltz(): Extração arrays + cálculos NumPy vetorizados puros
 ✅ _aplicar_taxa_recuperacao_padrao(): map() → merge estruturado com DataFrame otimizado
@@ -66,7 +66,8 @@ class CalculadorVoltz:
         self.params = params
         
         # Parâmetros específicos da VOLTZ
-        self.taxa_juros_remuneratorios = 0.0465  # 4,65% fixo
+        # NOTA: Taxa de juros remuneratórios (4,65% fixo) já está aplicada no valor da parcela
+        # Não é necessário calcular separadamente, pois o valor principal já inclui os juros
         self.taxa_multa = 0.02  # 2% sobre saldo corrigido pela IGP-M
         self.taxa_juros_moratorios = 0.01  # 1,0% a.m.
         
@@ -121,8 +122,9 @@ class CalculadorVoltz:
     
     def calcular_juros_remuneratorios_ate_vencimento(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calcula juros remuneratórios de 4,65% aplicados diretamente sobre o valor principal.
-        IMPORTANTE: Juros são aplicados diretamente, não com base em tempo/meses.
+        IMPORTANTE: Os juros remuneratórios (4,65%) já estão aplicados no valor da parcela.
+        Esta função apenas define o saldo devedor no vencimento como igual ao valor líquido,
+        pois o valor principal já inclui os juros remuneratórios calculados previamente.
         ULTRA-OTIMIZADO: Cálculos completamente vetorizados com NumPy para máxima performance.
         """
         df = df.copy()
@@ -130,9 +132,10 @@ class CalculadorVoltz:
         # CÁLCULOS FINAIS COMPLETAMENTE VETORIZADOS
         valores_liquidos = df['valor_liquido'].values
         
-        # Aplicar juros remuneratórios diretamente (4,65% sobre o valor principal)
-        df['juros_remuneratorios'] = valores_liquidos * self.taxa_juros_remuneratorios
-        df['saldo_devedor_vencimento'] = valores_liquidos + df['juros_remuneratorios'].values
+        # NOTA: Juros remuneratórios já estão incluídos no valor da parcela
+        # Não aplicamos taxa adicional, apenas definimos que juros_remuneratorios = 0
+        df['juros_remuneratorios'] = np.zeros(len(df))  # Zero pois já está no valor principal
+        df['saldo_devedor_vencimento'] = valores_liquidos  # Saldo = valor líquido (já com juros inclusos)
         
         return df
     
@@ -413,8 +416,9 @@ class CalculadorVoltz:
         """
         Calcula valor corrigido final para VOLTZ seguindo a sequência CORRETA:
         
-        ETAPA 1 - Até o vencimento:
-        - Valor principal + juros remuneratórios (4,65% fixo) = Saldo devedor no vencimento
+        ETAPA 1 - Valor base:
+        - Valor da parcela já inclui juros remuneratórios (4,65%) aplicados previamente
+        - Saldo devedor no vencimento = Valor da parcela (sem adição de juros)
         
         ETAPA 2 - Pós-vencimento (apenas para VENCIDOS):
         - Sobre saldo devedor no vencimento aplicar:
@@ -499,11 +503,10 @@ class CalculadorVoltz:
         Executa todo o processo de correção monetária específico para VOLTZ seguindo a ordem correta:
         
         1. Calcular valor líquido
-        2. Calcular juros remuneratórios até vencimento (4,65% a.m.)
-        3. Obter saldo devedor no vencimento
-        4. Aplicar correção monetária IGP-M sobre saldo devedor
-        5. Para vencidos: adicionar multa (2%) e juros moratórios (1% a.m.)
-        6. Aplicar taxa de recuperação
+        2. Definir saldo devedor no vencimento (valor líquido já inclui juros remuneratórios de 4,65%)
+        3. Aplicar correção monetária IGP-M sobre saldo devedor
+        4. Para vencidos: adicionar multa (2%) e juros moratórios (1% a.m.)
+        5. Aplicar taxa de recuperação
         """
         if df.empty:
             return df
@@ -515,9 +518,9 @@ class CalculadorVoltz:
             df = self.calcular_valor_liquido(df)
             st.success("✅ Valor líquido calculado")
             
-            # 2. Calcular juros remuneratórios até vencimento (4,65% a.m.)
+            # 2. Definir saldo devedor no vencimento (juros remuneratórios já inclusos no valor)
             df = self.calcular_juros_remuneratorios_ate_vencimento(df)
-            st.success("✅ Juros remuneratórios (4,65% a.m.) calculados até vencimento")
+            st.success("✅ Saldo devedor definido (juros remuneratórios já inclusos no valor da parcela)")
             
             # 3. Identificar status dos contratos (vencido/a vencer)
             df = self.identificar_status_contrato(df)
@@ -686,7 +689,8 @@ class CalculadorVoltz:
         
         with col2:
             juros_rem = df['juros_remuneratorios'].sum()
-            st.metric("📈 Juros Rem. (4,65%)", f"R$ {juros_rem:,.2f}")
+            st.metric("📈 Juros Adicionais (R$0)", f"R$ {juros_rem:,.2f}")
+            st.caption("Juros remuneratórios já inclusos no valor da parcela")
         
         with col3:
             saldo_venc = df['saldo_devedor_vencimento'].sum()
@@ -735,13 +739,13 @@ class CalculadorVoltz:
         st.info("""
         **🔍 Regras VOLTZ Aplicadas (Sequência Correta):**
         
-        **📋 ETAPA 1 - Até o Vencimento (TODOS):**
-        - ✅ Juros Remuneratórios: 4,65% a.m. (da origem até vencimento)
-        - ✅ Saldo Devedor no Vencimento = Valor Principal + Juros Remunerativos
+        **📋 ETAPA 1 - Valor Base (TODOS):**
+        - ✅ Valor da Parcela: Já inclui juros remuneratórios de 4,65% aplicados previamente
+        - ✅ Saldo Devedor no Vencimento = Valor da Parcela (juros já inclusos)
         
         **📋 ETAPA 2A - Contratos A VENCER:**
         - ✅ Correção IGP-M: aplicada sobre saldo devedor (do vencimento até data base)
-        - ✅ Valor Final = Saldo Devedor + Juros Remuneratórios
+        - ✅ Valor Final = Saldo Devedor Corrigido
         
         **📋 ETAPA 2B - Contratos VENCIDOS:**
         - ✅ Correção IGP-M: aplicada sobre saldo devedor (do vencimento até data base)
@@ -753,6 +757,7 @@ class CalculadorVoltz:
         - 📍 Fonte de dados: Aba específica 'IGPM' (não IGPM_IPCA)
         - 📍 Sempre IGP-M (nunca IPCA, mesmo após 2021)
         - 💼 Contratos CCBs (Cédulas de Crédito Bancário)
+        - 💡 **IMPORTANTE**: Juros remuneratórios (4,65%) já estão no valor da parcela
         - 🎯 Encargos calculados sobre valor corrigido pela IGP-M
         - ⚡ **SISTEMA OTIMIZADO**: Processamento vetorizado com merges eficientes
         """)
