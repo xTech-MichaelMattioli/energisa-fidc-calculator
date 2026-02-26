@@ -114,6 +114,21 @@ export interface UploadedFile {
   storagePath?: string;
   /** Upload status */
   uploadStatus?: "pending" | "uploading" | "uploaded" | "error";
+  /** Header validation status (from edge function) */
+  validationStatus?: "pending" | "validating" | "valid" | "invalid" | "error";
+  /** Validation error message */
+  validationError?: string;
+  /** Sheet name from Excel */
+  sheetName?: string;
+  /** Detailed column info from extract-columns edge function */
+  columnInfo?: Array<{
+    name: string;
+    index: number;
+    detectedType: "string" | "number" | "date" | "empty" | "mixed";
+    sampleValues: string[];
+    nonEmptyCount: number;
+    uniqueCount: number;
+  }>;
 }
 
 export interface FieldMapping {
