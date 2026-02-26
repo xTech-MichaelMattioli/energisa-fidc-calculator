@@ -6,6 +6,25 @@ import * as XLSX from "xlsx";
 import type { RawRecord, UploadedFile } from "@/types";
 
 /**
+ * Return true for cells that appear to be inline metadata rather than
+ * real column names.
+ *
+ * Observed pattern in EMS LIQ files: the header row contains the real 27
+ * column labels AND two trailing cells — "Data base:" (a label ending with
+ * ':') and the reference date value (ISO date string).  Both should be
+ * excluded from the column list that we display and pass downstream.
+ */
+function isMetadataColumn(name: string): boolean {
+  if (!name || !name.trim()) return true;
+  // Labels that are just metadata keys, e.g. "Data base:"
+  if (name.trim().endsWith(":")) return true;
+  // Cells whose value IS a date string (ISO format or "DD/MM/YYYY")
+  if (/^\d{4}-\d{2}-\d{2}(T|\s|$)/.test(name.trim())) return true;
+  if (/^\d{2}[/\-.]\d{2}[/\-.]\d{4}$/.test(name.trim())) return true;
+  return false;
+}
+
+/**
  * Scan the first `limit` rows and return the index of the row that looks
  * most like a header: most non-empty cells that are text (not numbers /
  * pure dates). Falls back to 0 if nothing is found.
@@ -70,10 +89,12 @@ export async function parseExcelFile(file: File): Promise<UploadedFile> {
         const headerRowIdx = findHeaderRowIndex(rawRows);
         const headerRow = rawRows[headerRowIdx] as unknown[];
 
-        // Build column names from that row
+        // Build column names from that row — strip inline metadata cells
+        // (e.g. "Data base:" label + date value that EMS LIQ files embed in
+        //  the header row alongside the real column names).
         const columns: string[] = headerRow
           .map((c) => String(c ?? "").trim())
-          .filter((c) => c.length > 0);
+          .filter((c) => c.length > 0 && !isMetadataColumn(c));
 
         // --- Step 2: parse keyed JSON using the correct header row ---
         // sheet_to_json with range starting at headerRowIdx uses that row as keys
@@ -121,7 +142,11 @@ export async function parseExcelFile(file: File): Promise<UploadedFile> {
           id: crypto.randomUUID(),
           name: file.name,
           data: jsonData,
-          columns: jsonData.length > 0 ? Object.keys(jsonData[0]) : columns,
+          // Prefer keys from first data row; strip residual metadata columns
+          columns:
+            jsonData.length > 0
+              ? Object.keys(jsonData[0]).filter((k) => !isMetadataColumn(k))
+              : columns,
           rowCount: jsonData.length,
           detectedDate,
           isVoltz,

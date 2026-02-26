@@ -90,6 +90,31 @@ export function UploadPage() {
 
         // Run the async pipeline without blocking the loop
         (async () => {
+          // ── PRE-UPLOAD VALIDATION ────────────────────────────────
+          // Check locally-parsed result before wasting Storage quota.
+          // If the parser found 0 columns or 0 data rows the file is
+          // structurally invalid — reject immediately without uploading.
+          if (parsed_item.columns.length === 0 || parsed_item.rowCount === 0) {
+            const reason =
+              parsed_item.columns.length === 0
+                ? "Cabeçalho não detectado — nenhuma coluna reconhecida na primeira linha."
+                : "Arquivo sem dados — nenhuma linha de dados encontrada após o cabeçalho.";
+            console.warn(`[pre-upload] rejected "${file.name}": ${reason}`);
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id
+                  ? {
+                      ...f,
+                      uploadStatus: "error",
+                      validationStatus: "invalid",
+                      validationError: reason,
+                    }
+                  : f
+              )
+            );
+            return; // skip upload entirely
+          }
+
           // 2a. Upload to Storage
           setUploadedFiles((prev) =>
             prev.map((f) =>
