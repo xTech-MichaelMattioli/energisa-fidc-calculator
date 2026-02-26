@@ -8,6 +8,7 @@ import numpy as np
 from datetime import datetime
 import streamlit as st
 from .calculador_voltz import CalculadorVoltz
+from .calculador_remuneracao_variavel import CalculadorRemuneracaoVariavel
 
 
 class CalculadorCorrecao:
@@ -44,13 +45,153 @@ class CalculadorCorrecao:
     
     def limpar_e_converter_valor(self, serie_valor: pd.Series) -> pd.Series:
         """
-        Limpa e converte série de valores para numérico.
-        """
-        # Converter para numérico
-        valores_convertidos = pd.to_numeric(serie_valor, errors='coerce')
+        Limpa e converte série de valores para numérico, tratando diversos formatos.
         
-        # Substituir valores inválidos por 0
-        valores_convertidos = valores_convertidos.fillna(0)
+        Formatos suportados:
+        - "1.234,56" (formato brasileiro)
+        - "1,234.56" (formato americano)
+        - "R$ 1.234,56" (com símbolo de moeda)
+        - "1 234,56" (separador de milhares com espaço)
+        - "(1.234,56)" (valores negativos entre parênteses)
+        - "-1.234,56" (valores negativos com sinal)
+        - "1234,56" (sem separador de milhares)
+        - "1234.56" (decimal com ponto)
+        - Valores já numéricos (int, float)
+        - Strings vazias, None, NaN
+        """
+        import re
+        
+        def limpar_valor_individual(valor):
+            """Limpa um valor individual"""
+            # Se já é numérico, retorna como está
+            if pd.isna(valor) or valor is None:
+                return 0.0
+                
+            if isinstance(valor, (int, float)):
+                return float(valor)
+            
+            # Converter para string se não for
+            if not isinstance(valor, str):
+                valor = str(valor)
+            
+            # Remover espaços extras
+            valor = valor.strip()
+            
+            # Se string vazia, retorna 0
+            if valor == '' or valor.lower() in ['null', 'none', 'n/a', '#n/a', 'nan']:
+                return 0.0
+            
+            # Detectar se valor está entre parênteses (valor negativo)
+            eh_negativo = False
+            if valor.startswith('(') and valor.endswith(')'):
+                eh_negativo = True
+                valor = valor[1:-1]  # Remove parênteses
+            elif valor.startswith('-'):
+                eh_negativo = True
+                valor = valor[1:]  # Remove sinal negativo
+            
+            # Remover símbolos de moeda comuns
+            simbolos_moeda = ['R$', 'USD', 'EUR', '$', '€', '£', 'US$']
+            for simbolo in simbolos_moeda:
+                valor = valor.replace(simbolo, '')
+            
+            # Remover espaços novamente após remoção dos símbolos
+            valor = valor.strip()
+            
+            # Remover caracteres não numéricos exceto vírgula, ponto e sinal de menos
+            # Manter apenas números, vírgulas, pontos
+            valor_limpo = re.sub(r'[^\d.,\-]', '', valor)
+            
+            if not valor_limpo:
+                return 0.0
+            
+            # Detectar formato do número
+            # Contar vírgulas e pontos
+            num_virgulas = valor_limpo.count(',')
+            num_pontos = valor_limpo.count('.')
+            
+            try:
+                if num_virgulas == 0 and num_pontos == 0:
+                    # Apenas números: "1234"
+                    resultado = float(valor_limpo)
+                    
+                elif num_virgulas == 1 and num_pontos == 0:
+                    # Formato brasileiro com vírgula decimal: "1234,56"
+                    resultado = float(valor_limpo.replace(',', '.'))
+                    
+                elif num_virgulas == 0 and num_pontos == 1:
+                    # Pode ser formato americano "1234.56" ou separador de milhares "1.234"
+                    partes = valor_limpo.split('.')
+                    if len(partes[-1]) <= 2:  # Última parte tem 1-2 dígitos = decimal
+                        # Formato americano: "1234.56"
+                        resultado = float(valor_limpo)
+                    else:
+                        # Separador de milhares: "1.234" -> "1234"
+                        resultado = float(valor_limpo.replace('.', ''))
+                        
+                elif num_virgulas == 1 and num_pontos >= 1:
+                    # Formato brasileiro completo: "1.234.567,89"
+                    # ou formato misto: "1.234,56"
+                    partes_virgula = valor_limpo.split(',')
+                    if len(partes_virgula) == 2 and len(partes_virgula[1]) <= 2:
+                        # Vírgula é separador decimal
+                        parte_inteira = partes_virgula[0].replace('.', '')  # Remove pontos da parte inteira
+                        parte_decimal = partes_virgula[1]
+                        resultado = float(f"{parte_inteira}.{parte_decimal}")
+                    else:
+                        # Formato confuso, tentar conversão direta
+                        resultado = float(valor_limpo.replace('.', '').replace(',', '.'))
+                        
+                elif num_virgulas >= 2 or num_pontos >= 2:
+                    # Formato americano completo: "1,234,567.89"
+                    if '.' in valor_limpo and valor_limpo.rindex('.') > valor_limpo.rindex(','):
+                        # Ponto é decimal: "1,234,567.89"
+                        partes_ponto = valor_limpo.rsplit('.', 1)
+                        parte_inteira = partes_ponto[0].replace(',', '')  # Remove vírgulas da parte inteira
+                        parte_decimal = partes_ponto[1]
+                        resultado = float(f"{parte_inteira}.{parte_decimal}")
+                    else:
+                        # Vírgula é decimal: "1.234.567,89"
+                        partes_virgula = valor_limpo.rsplit(',', 1)
+                        parte_inteira = partes_virgula[0].replace('.', '')  # Remove pontos da parte inteira
+                        parte_decimal = partes_virgula[1] if len(partes_virgula) > 1 else '0'
+                        resultado = float(f"{parte_inteira}.{parte_decimal}")
+                else:
+                    # Caso não identificado, tentar conversão direta
+                    resultado = float(valor_limpo.replace(',', '.'))
+                    
+                # Aplicar sinal negativo se detectado
+                if eh_negativo:
+                    resultado = -resultado
+                    
+                return resultado
+                
+            except (ValueError, IndexError) as e:
+                # Se falhou, tentar métodos alternativos
+                try:
+                    # Remover tudo exceto números e usar como inteiro
+                    apenas_numeros = re.sub(r'[^\d]', '', valor_limpo)
+                    if apenas_numeros:
+                        resultado = float(apenas_numeros)
+                        # Se tinha vírgula ou ponto, assumir que são casas decimais
+                        if ',' in valor_limpo or '.' in valor_limpo:
+                            resultado = resultado / 100  # Assumir 2 casas decimais
+                        if eh_negativo:
+                            resultado = -resultado
+                        return resultado
+                    else:
+                        return 0.0
+                except:
+                    return 0.0
+        
+        # Aplicar a limpeza em toda a série
+        valores_convertidos = serie_valor.apply(limpar_valor_individual)
+        
+        # Garantir que é float64
+        valores_convertidos = valores_convertidos.astype('float64')
+        
+        # Substituir infinitos por 0
+        valores_convertidos = valores_convertidos.replace([np.inf, -np.inf], 0)
         
         return valores_convertidos
     
@@ -69,20 +210,14 @@ class CalculadorCorrecao:
         # Valor não cedido
         if 'valor_nao_cedido' in df.columns:
             df['valor_nao_cedido_limpo'] = self.limpar_e_converter_valor(df['valor_nao_cedido'].fillna(0))
-        else:
-            df['valor_nao_cedido_limpo'] = 0
         
         # Valor terceiro
         if 'valor_terceiro' in df.columns:
             df['valor_terceiro_limpo'] = self.limpar_e_converter_valor(df['valor_terceiro'].fillna(0))
-        else:
-            df['valor_terceiro_limpo'] = 0
         
         # Valor CIP
         if 'valor_cip' in df.columns:
             df['valor_cip_limpo'] = self.limpar_e_converter_valor(df['valor_cip'].fillna(0))
-        else:
-            df['valor_cip_limpo'] = 0
         
         # Calcular valor líquido
         df['valor_liquido'] = (
@@ -397,7 +532,10 @@ class CalculadorCorrecao:
         """
         Calcula valor justo reajustado aplicando descontos por faixa de aging.
         
-        Descontos por aging:
+        Agora utiliza o novo sistema modular de remuneração variável que permite
+        diferentes configurações por distribuidora.
+        
+        Descontos por aging (configuração padrão):
         - A vencer: 6,5%
         - Menor que 30 dias: 6,5%
         - De 31 a 59 dias: 6,5%
@@ -412,49 +550,19 @@ class CalculadorCorrecao:
             return df
         
         # Verificar se temos valor_justo
-        if 'valor_justo' not in df.columns:
-            st.warning("⚠️ Coluna 'valor_justo' não encontrada. Calculando valor justo reajustado apenas com valor corrigido.")
-            df['valor_justo'] = df.get('valor_corrigido', 0)
+        if 'valor_justo_ate_recebimento' not in df.columns:
+            st.warning("⚠️ Coluna 'valor_justo_ate_recebimento' não encontrada. Calculando valor justo reajustado apenas com valor corrigido.")
+            df['valor_justo_ate_recebimento'] = df.get('valor_corrigido', 0)
         
-        df = df.copy()
+        # Usar o novo calculador de remuneração variável
+        calculador_rv = CalculadorRemuneracaoVariavel(distribuidora="PADRAO")
+        df_resultado = calculador_rv.calcular_remuneracao_variavel(df)
         
-        # Dicionário de descontos por aging
-        descontos_aging = {
-            'A vencer': 0.065,                    # 6,5%
-            'Menor que 30 dias': 0.065,          # 6,5%
-            'De 31 a 59 dias': 0.065,            # 6,5%
-            'De 60 a 89 dias': 0.065,            # 6,5%
-            'De 90 a 119 dias': 0.080,           # 8,0%
-            'De 120 a 359 dias': 0.150,          # 15,0%
-            'De 360 a 719 dias': 0.220,          # 22,0%
-            'De 720 a 1080 dias': 0.360,         # 36,0%
-            'Maior que 1080 dias': 0.500         # 50,0% (Maior que 1080)
-        }
+        # Manter compatibilidade com o código existente
+        df_resultado['valor_justo_pos_rv'] = df_resultado['remuneracao_variavel_valor_final']
         
-        # Mapear desconto para cada registro
-        df['desconto_aging_perc'] = df['aging'].map(descontos_aging).fillna(0.0)
-        
-        # Calcular valor do desconto
-        df['desconto_aging_valor'] = df['valor_justo'] * df['desconto_aging_perc']
-        
-        # Calcular valor justo reajustado (valor justo - desconto)
-        df['valor_justo_reajustado'] = df['valor_justo'] - df['desconto_aging_valor']
-        
-        # Garantir que não seja negativo
-        df['valor_justo_reajustado'] = np.maximum(df['valor_justo_reajustado'], 0)
-        
+        # Gerar resumo usando o novo sistema
         with st.spinner("💎 Calculando valor justo reajustado..."):
-            total_valor_justo = df['valor_justo'].sum()
-            total_desconto = df['desconto_aging_valor'].sum()
-            total_reajustado = df['valor_justo_reajustado'].sum()
-            percentual_desconto = (total_desconto / total_valor_justo) * 100 if total_valor_justo > 0 else 0
-            
-            st.success(f"✅ Valor justo reajustado calculado!")
-            st.info(f"""
-            **💎 Resumo do Reajuste:**
-            - **Valor Justo Original:** R$ {total_valor_justo:,.2f}
-            - **Total de Descontos:** R$ {total_desconto:,.2f} ({percentual_desconto:.1f}%)
-            - **Valor Justo Reajustado:** R$ {total_reajustado:,.2f}
-            """)
-        
-        return df
+            resumo = calculador_rv.gerar_resumo_remuneracao(df_resultado)
+
+        return df_resultado

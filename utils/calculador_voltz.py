@@ -2,43 +2,16 @@
 Calculador de correção monetária específico para VOLTZ (Fintech)
 Sistema de cálculo diferenciado para contratos CCBs com regras específicas
 
-🚀 OTIMIZAÇÕES ULTRA-AVANÇADAS DE PERFORMANCE IMPLEMENTADAS:
-✅ calcular_correcao_monetaria_igpm(): Loop O(n) → merge_asof O(log n) + operações vetorizadas
-✅ calcular_juros_remuneratorios_ate_vencimento(): Definição direta do saldo (juros já inclusos no valor)
-✅ identificar_status_contrato(): Operações timestamp NumPy puras para máxima velocidade  
-✅ calcular_valor_corrigido_voltz(): Extração arrays + cálculos NumPy vetorizados puros
-✅ _aplicar_taxa_recuperacao_padrao(): map() → merge estruturado com DataFrame otimizado
-✅ buscar_indice_correcao(): Versão deprecated simplificada para casos excepcionais
+OTIMIZAÇÕES DE PERFORMANCE:
+- Operações vetorizadas com NumPy
+- Merge otimizado para lookup de índices
+- Sistema de checkpoint automatizado
+- Cálculos matriciais para máxima velocidade
 
-📋 CHECKPOINTS INTELIGENTES IMPLEMENTADOS:
-✅ Sistema de cache automatizado para evitar reprocessamento desnecessário
-✅ Detecção de mudanças em DataFrames via hash MD5 
-✅ Gestão de memória otimizada com limpeza automática de cache
-✅ Session state persistente entre execuções
-
-🎯 COMPLEXIDADE COMPUTACIONAL OTIMIZADA:
-- ANTES: O(n²) em casos críticos, O(n) para a maioria das operações
-- DEPOIS: O(1) para 95% das operações, O(log n) apenas para busca de índices históricos
-- RESULTADO: 80-95% redução no tempo para datasets > 50k registros
-
-⚡ TÉCNICAS AVANÇADAS IMPLEMENTADAS:
-- merge_asof para busca temporal eficiente (substituindo loops)
-- NumPy arrays extraction para eliminar overhead do Pandas
-- Operações vetorizadas puras com np.where, np.maximum, np.power
-- Timestamp conversion para cálculos de data ultra-rápidos
-- Lookup tables ordenadas para busca binária O(log n)
-- DataFrame structured merges para relacionamentos eficientes
-
-📊 ESTRUTURA DOS DADOS OTIMIZADA:
-- df_indices_economicos: ['data', 'indice', 'periodo', 'periodo_ordinal'] - busca temporal O(log n)
-- df principal: ['data_vencimento_limpa', 'aging', 'valor_corrigido'] - operações vetorizadas
-- df_taxa_recuperacao: ['Aging', 'Taxa de recuperação', 'Empresa'] - merge estruturado O(1)
-
-🔥 BENCHMARK REAL ESTIMADO:
-- 10k registros: ~0.05s (antes: ~0.8s) = 16x speedup
-- 100k registros: ~0.3s (antes: ~15s) = 50x speedup  
-- 1M registros: ~2s (antes: ~180s) = 90x speedup
-- Escalabilidade: Quase linear O(1) para operações principais
+ESTRUTURA DOS DADOS:
+- df_indices_economicos: busca temporal otimizada
+- df principal: operações vetorizadas
+- df_taxa_recuperacao: merge estruturado
 """
 
 import pandas as pd
@@ -48,6 +21,7 @@ from datetime import datetime, timedelta, date
 import time
 from typing import Optional
 from .checkpoint_manager import usar_checkpoint, checkpoint_manager
+from .calculador_remuneracao_variavel import CalculadorRemuneracaoVariavel
 
 
 class CalculadorVoltz:
@@ -66,7 +40,7 @@ class CalculadorVoltz:
         self.params = params
         
         # Parâmetros específicos da VOLTZ
-        # NOTA: Taxa de juros remuneratórios (4,65% fixo) já está aplicada no valor da parcela
+        # NOTA: Taxa de juros remuneratórios (4,65% a.m.) calculada do vencimento até data base
         # Não é necessário calcular separadamente, pois o valor principal já inclui os juros
         self.taxa_multa = 0.02  # 2% sobre saldo corrigido pela IGP-M
         self.taxa_juros_moratorios = 0.01  # 1,0% a.m.
@@ -107,11 +81,6 @@ class CalculadorVoltz:
         
         df['valor_principal_limpo'] = self.limpar_e_converter_valor(df['valor_principal'])
         
-        # Para VOLTZ, valores de dedução são sempre 0 (preenchidos automaticamente no mapeamento)
-        df['valor_nao_cedido_limpo'] = 0
-        df['valor_terceiro_limpo'] = 0
-        df['valor_cip_limpo'] = 0
-        
         # Calcular valor líquido (será igual ao principal para VOLTZ)
         df['valor_liquido'] = df['valor_principal_limpo']
         
@@ -120,22 +89,54 @@ class CalculadorVoltz:
         
         return df
     
-    def calcular_juros_remuneratorios_ate_vencimento(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calcular_juros_remuneratorios_ate_data_base(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        IMPORTANTE: Os juros remuneratórios (4,65%) já estão aplicados no valor da parcela.
-        Esta função apenas define o saldo devedor no vencimento como igual ao valor líquido,
-        pois o valor principal já inclui os juros remuneratórios calculados previamente.
-        ULTRA-OTIMIZADO: Cálculos completamente vetorizados com NumPy para máxima performance.
+        Calcula juros remuneratórios compostos de 4,65% a.m. sobre o valor líquido
+        da data de vencimento até a data base.
+        
+        Fórmula: Valor Corrigido = Valor Líquido × (1 + 0.0465)^meses
         """
         df = df.copy()
         
-        # CÁLCULOS FINAIS COMPLETAMENTE VETORIZADOS
-        valores_liquidos = df['valor_liquido'].values
+        # Obter data base dos parâmetros
+        data_base = self.params.data_base_padrao
+        if isinstance(data_base, str):
+            data_base = pd.to_datetime(data_base)
         
-        # NOTA: Juros remuneratórios já estão incluídos no valor da parcela
-        # Não aplicamos taxa adicional, apenas definimos que juros_remuneratorios = 0
-        df['juros_remuneratorios'] = np.zeros(len(df))  # Zero pois já está no valor principal
-        df['saldo_devedor_vencimento'] = valores_liquidos  # Saldo = valor líquido (já com juros inclusos)
+        # Garantir que temos data de vencimento limpa
+        if 'data_vencimento_limpa' not in df.columns:
+            if 'data_vencimento' in df.columns:
+                df['data_vencimento_limpa'] = pd.to_datetime(df['data_vencimento'], errors='coerce')
+        
+        # Taxa de juros remuneratórios mensal (4,65%)
+        taxa_juros_remuneratorios = 0.0465
+        
+        # Converter datas para cálculo vetorizado
+        df['data_vencimento_limpa'] = pd.to_datetime(df['data_vencimento_limpa'])
+        data_base_pd = pd.to_datetime(data_base)
+        
+        # Calcular diferença em meses (vetorizado)
+        # Para contratos já vencidos: diferença positiva
+        # Para contratos a vencer: diferença negativa (será zerada)
+        dias_diff = (data_base_pd - df['data_vencimento_limpa']).dt.days
+        meses_diff = dias_diff / 30  # Conversão mais precisa para meses
+        
+        # Garantir que meses não seja negativo (contratos a vencer ficam com 0 meses)
+        meses_para_juros = np.maximum(meses_diff, 0)
+        
+        # Calcular fator de juros compostos vetorizado
+        # Fórmula: (1 + taxa)^meses
+        fator_juros = np.power(1 + taxa_juros_remuneratorios, meses_para_juros)
+        
+        # Aplicar juros sobre valor líquido
+        valores_liquidos = df['valor_liquido'].values
+        valores_com_juros = valores_liquidos * fator_juros
+        
+        # Calcular juros remuneratórios (diferença entre valor com juros e valor original)
+        df['juros_remuneratorios_ate_data_base'] = valores_com_juros - valores_liquidos
+        
+        # Garantir que valores não sejam negativos
+        df['juros_remuneratorios_ate_data_base'] = np.maximum(df['juros_remuneratorios_ate_data_base'], 0)
         
         return df
     
@@ -204,11 +205,384 @@ class CalculadorVoltz:
             st.warning(f"⚠️ Erro ao buscar índice IGP-M para VOLTZ: {str(e)}")
             return 1.0
     
+    def _obter_dados_igpm_voltz(self):
+        """
+        Obtém dados do IGP-M específicos para VOLTZ.
+        Sempre usa df_indices_igpm quando disponível, senão df_indices_economicos.
+        """
+        # Priorizar df_indices_igpm (específico para VOLTZ)
+        if hasattr(st.session_state, 'df_indices_igpm') and st.session_state.df_indices_igpm is not None:
+            dados_igpm = st.session_state.df_indices_igpm
+            # st.success("� **VOLTZ**: Usando dados IGP-M da aba específica 'IGPM'")
+        elif hasattr(st.session_state, 'df_indices_economicos') and st.session_state.df_indices_economicos is not None:
+            dados_igpm = st.session_state.df_indices_economicos
+            st.warning("⚠️ **VOLTZ**: Usando fallback - dados de df_indices_economicos")
+        else:
+            st.error("❌ **ERRO VOLTZ**: Nenhum dado de índices IGP-M encontrado!")
+            return None
+        
+        # Validar se os dados têm a estrutura correta (data + indice)
+        if 'data' not in dados_igpm.columns or 'indice' not in dados_igpm.columns:
+            st.error(f"❌ **ERRO VOLTZ**: Estrutura de dados inválida! Colunas encontradas: {list(dados_igpm.columns)}")
+            st.error("🔧 **SOLUÇÃO**: O arquivo deve ter colunas 'data' e 'indice'")
+            return None
+        
+        # st.info(f"✅ **VOLTZ**: Dados IGP-M válidos encontrados com {len(dados_igpm)} registros")
+        return dados_igpm
+
+    def _calcular_ultimo_dia_mes_vetorizado(self, df_datas: pd.DataFrame) -> pd.Series:
+        """
+        Função auxiliar para calcular último dia do mês de forma vetorizada usando datetime.
+        
+        Parâmetros:
+        - df_datas: DataFrame com colunas 'ano' e 'mes'
+        
+        Retorna:
+        - pd.Series: Série com último dia de cada mês
+        """
+        # Criar datas do primeiro dia do mês seguinte (vetorizado)
+        anos = df_datas['ano'].values
+        meses = df_datas['mes'].values
+        
+        # Calcular ano e mês seguinte (vetorizado)
+        meses_seguinte = np.where(meses == 12, 1, meses + 1)
+        anos_seguinte = np.where(meses == 12, anos + 1, anos)
+        
+        # Criar datas do primeiro dia do mês seguinte
+        datas_primeiro_dia_seguinte = pd.to_datetime({
+            'year': anos_seguinte,
+            'month': meses_seguinte,
+            'day': 1
+        })
+        
+        # Subtrair 1 dia para obter último dia do mês anterior (vetorizado)
+        datas_ultimo_dia = datas_primeiro_dia_seguinte - pd.Timedelta(days=1)
+        
+        # Extrair apenas o dia (vetorizado)
+        return datas_ultimo_dia.dt.day
+
+    def calcular_indice_proporcional_data(self, data_alvo: pd.Timestamp, df_indices_sorted: pd.DataFrame) -> float:
+        """
+        Calcula índice IGP-M proporcional para uma data específica considerando os dias no mês.
+        
+        FUNÇÃO GENÉRICA para qualquer data alvo.
+        
+        Parâmetros:
+        - data_alvo: Data para a qual calcular o índice proporcional
+        - df_indices_sorted: DataFrame com índices ordenados (deve ter colunas 'periodo', 'indice', 'indice_anterior')
+        
+        Retorna:
+        - float: Índice proporcional calculado
+        
+        Exemplo:
+        - Data: 10/01/2023 (dia 10 de janeiro)
+        - Mês tem 31 dias
+        - Proporção: 10/31 = 0.3226
+        - Índice proporcional = índice_dezembro_2022 + (índice_janeiro_2023 - índice_dezembro_2022) * 0.3226
+        """
+        if pd.isna(data_alvo):
+            return 1.0
+            
+        # Calcular proporção de dias no mês da data alvo
+        dia_alvo = data_alvo.day
+        
+        # Calcular último dia do mês da data alvo
+        if data_alvo.month == 12:
+            primeiro_dia_mes_seguinte = pd.Timestamp(year=data_alvo.year + 1, month=1, day=1)
+        else:
+            primeiro_dia_mes_seguinte = pd.Timestamp(year=data_alvo.year, month=data_alvo.month + 1, day=1)
+        
+        ultimo_dia_mes = (primeiro_dia_mes_seguinte - pd.Timedelta(days=1)).day
+        proporcao_dias = dia_alvo / ultimo_dia_mes
+        
+        # Buscar índices do mês da data alvo
+        periodo_alvo = pd.Period(data_alvo, freq='M')
+        mask_mes = df_indices_sorted['periodo'] == periodo_alvo
+        
+        if mask_mes.any():
+            # Índices do mês encontrados
+            registro = df_indices_sorted[mask_mes].iloc[0]
+            indice_mes = registro['indice']
+            indice_anterior = registro['indice_anterior']
+        else:
+            # Buscar último índice disponível antes da data alvo
+            mask_antes = df_indices_sorted['periodo'] < periodo_alvo
+            if mask_antes.any():
+                ultimo_antes = df_indices_sorted[mask_antes].iloc[-1]
+                indice_mes = ultimo_antes['indice']
+                indice_anterior = ultimo_antes['indice_anterior']
+            else:
+                return 1.0
+        
+        # Calcular índice proporcional
+        variacao_mensal = indice_mes - indice_anterior
+        variacao_proporcional = variacao_mensal * proporcao_dias
+        indice_proporcional = indice_anterior + variacao_proporcional
+        
+        # REMOVIDO: return max(indice_proporcional, 1.0) para permitir índices negativos
+        return indice_proporcional  # Permitir valores negativos se existirem nos dados
+    
+    def calcular_indices_proporcionais_vetorizado(self, datas_series: pd.Series, df_indices_sorted: pd.DataFrame) -> pd.Series:
+        """
+        Versão vetorizada para calcular índices proporcionais para uma série de datas.
+        
+        FUNÇÃO GENÉRICA OTIMIZADA para processar múltiplas datas de uma vez.
+        
+        Parâmetros:
+        - datas_series: Série pandas com datas para calcular índices
+        - df_indices_sorted: DataFrame com índices ordenados
+        
+        Retorna:
+        - pd.Series: Série com índices proporcionais calculados
+        """
+        if datas_series.empty:
+            return pd.Series([], dtype=float)
+        
+        # Criar DataFrame temporário com dados das datas
+        df_temp = pd.DataFrame({
+            'data_alvo': pd.to_datetime(datas_series),
+            'original_index': datas_series.index
+        }).dropna()
+        
+        if df_temp.empty:
+            return pd.Series([1.0] * len(datas_series), index=datas_series.index)
+        
+        # CÁLCULOS VETORIZADOS DE PROPORÇÕES
+        df_temp['ano'] = df_temp['data_alvo'].dt.year
+        df_temp['mes'] = df_temp['data_alvo'].dt.month
+        df_temp['dia'] = df_temp['data_alvo'].dt.day
+        
+        # Calcular último dia do mês usando função auxiliar robusta
+        df_temp['ultimo_dia_mes'] = self._calcular_ultimo_dia_mes_vetorizado(df_temp[['ano', 'mes']])
+        
+        # Proporção de dias (vetorizado)
+        df_temp['proporcao_dias'] = df_temp['dia'] / df_temp['ultimo_dia_mes']
+        
+        # Período mensal para merge
+        df_temp['periodo'] = df_temp['data_alvo'].dt.to_period('M')
+        
+        # MERGE PARA OBTER ÍNDICES
+        df_com_indices = df_temp.merge(
+            df_indices_sorted[['periodo', 'indice', 'indice_anterior']],
+            on='periodo',
+            how='left'
+        )
+        
+        # TRATAMENTO DE ÍNDICES FALTANTES
+        mask_sem_indice = (df_com_indices['indice'].isna() | df_com_indices['indice_anterior'].isna())
+        
+        if mask_sem_indice.sum() > 0:
+            # Buscar índices usando merge_asof para registros faltantes
+            df_sem_indices = df_com_indices[mask_sem_indice].copy()
+            df_sem_indices['periodo_ordinal'] = df_sem_indices['periodo'].map(
+                lambda x: x.ordinal if pd.notna(x) else 0
+            )
+            
+            merged_indices = pd.merge_asof(
+                df_sem_indices[['periodo_ordinal']].reset_index().sort_values('periodo_ordinal'),
+                df_indices_sorted[['periodo_ordinal', 'indice', 'indice_anterior']].sort_values('periodo_ordinal'),
+                left_on='periodo_ordinal',
+                right_on='periodo_ordinal',
+                direction='backward'
+            ).sort_values('index').set_index('index')
+            
+            # Atualizar valores faltantes
+            df_com_indices.loc[mask_sem_indice, 'indice'] = merged_indices['indice'].fillna(1.0)
+            df_com_indices.loc[mask_sem_indice, 'indice_anterior'] = merged_indices['indice_anterior'].fillna(1.0)
+        
+        # Preencher valores restantes
+        df_com_indices['indice'] = df_com_indices['indice'].fillna(1.0)
+        df_com_indices['indice_anterior'] = df_com_indices['indice_anterior'].fillna(1.0)
+        
+        # CALCULAR ÍNDICES PROPORCIONAIS (VETORIZADO)
+        variacao_mensal = df_com_indices['indice'] - df_com_indices['indice_anterior']
+        variacao_proporcional = variacao_mensal * df_com_indices['proporcao_dias']
+        df_com_indices['indice_proporcional'] = df_com_indices['indice_anterior'] + variacao_proporcional
+        
+        # REMOVIDO: Garantir que não seja menor que 1 (para permitir índices negativos)
+        # df_com_indices['indice_proporcional'] = np.maximum(df_com_indices['indice_proporcional'], 1.0)
+        
+        # Limpar colunas auxiliares criadas durante o cálculo
+        colunas_auxiliares = [
+            'ultimo_dia_mes', 'proporcao_dias', 'periodo', 'ano', 'mes', 'dia'
+        ]
+        df_com_indices = df_com_indices.drop(columns=colunas_auxiliares, errors='ignore')
+        
+        # Retornar série com índices corretos
+        resultado = pd.Series([1.0] * len(datas_series), index=datas_series.index)
+        resultado.loc[df_com_indices['original_index']] = df_com_indices['indice_proporcional']
+        
+        return resultado
+
+    def exemplo_calculo_proporcional(self, data_exemplo: str = "2023-01-10") -> dict:
+        """
+        Função de exemplo para demonstrar o cálculo proporcional de índices IGP-M.
+        
+        EXEMPLO PRÁTICO:
+        - Data de vencimento: 10/01/2023 (dia 10 de janeiro)
+        - Janeiro tem 31 dias
+        - Proporção: 10/31 = 0.3226 (32.26% do mês)
+        - Índice dezembro/2022: 100.0
+        - Índice janeiro/2023: 105.0
+        - Variação mensal: 105.0 - 100.0 = 5.0
+        - Variação proporcional: 5.0 × 0.3226 = 1.613
+        - Índice proporcional: 100.0 + 1.613 = 101.613
+        
+        Parâmetros:
+        - data_exemplo: Data para demonstração (formato: "YYYY-MM-DD")
+        
+        Retorna:
+        - dict: Dicionário com detalhes do cálculo passo a passo
+        """
+        try:
+            data_teste = pd.to_datetime(data_exemplo)
+            
+            # Criar dados de exemplo para demonstração
+            dados_exemplo = {
+                'data': [
+                    pd.Timestamp('2022-12-01'),  # Índice anterior
+                    pd.Timestamp('2023-01-01'),  # Índice do mês
+                    pd.Timestamp('2023-02-01')   # Próximo índice
+                ],
+                'indice': [100.0, 105.0, 108.0]  # Índices exemplo
+            }
+            
+            df_indices_exemplo = pd.DataFrame(dados_exemplo)
+            df_indices_exemplo['periodo'] = df_indices_exemplo['data'].dt.to_period('M')
+            df_indices_sorted = df_indices_exemplo.sort_values('periodo').reset_index(drop=True)
+            df_indices_sorted['indice_anterior'] = df_indices_sorted['indice'].shift(1).fillna(df_indices_sorted['indice'])
+            df_indices_sorted['periodo_ordinal'] = df_indices_sorted['periodo'].map(lambda x: x.ordinal)
+            
+            # Calcular índice proporcional
+            indice_proporcional = self.calcular_indice_proporcional_data(data_teste, df_indices_sorted)
+            
+            # Detalhes do cálculo
+            dia_teste = data_teste.day
+            if data_teste.month == 12:
+                primeiro_dia_mes_seguinte = pd.Timestamp(year=data_teste.year + 1, month=1, day=1)
+            else:
+                primeiro_dia_mes_seguinte = pd.Timestamp(year=data_teste.year, month=data_teste.month + 1, day=1)
+            
+            ultimo_dia_mes = (primeiro_dia_mes_seguinte - pd.Timedelta(days=1)).day
+            proporcao_dias = dia_teste / ultimo_dia_mes
+            
+            # Buscar índices
+            periodo_teste = pd.Period(data_teste, freq='M')
+            mask_mes = df_indices_sorted['periodo'] == periodo_teste
+            
+            if mask_mes.any():
+                registro = df_indices_sorted[mask_mes].iloc[0]
+                indice_mes = registro['indice']
+                indice_anterior = registro['indice_anterior']
+            else:
+                indice_mes = 105.0  # Valor padrão para demonstração
+                indice_anterior = 100.0
+            
+            variacao_mensal = indice_mes - indice_anterior
+            variacao_proporcional = variacao_mensal * proporcao_dias
+            
+            resultado = {
+                'data_exemplo': data_exemplo,
+                'dia_no_mes': dia_teste,
+                'total_dias_mes': ultimo_dia_mes,
+                'proporcao_dias': round(proporcao_dias, 4),
+                'proporcao_percentual': round(proporcao_dias * 100, 2),
+                'indice_mes_anterior': indice_anterior,
+                'indice_mes_atual': indice_mes,
+                'variacao_mensal': variacao_mensal,
+                'variacao_proporcional': round(variacao_proporcional, 3),
+                'indice_proporcional_calculado': round(indice_anterior + variacao_proporcional, 3),
+                'indice_proporcional_funcao': round(indice_proporcional, 3),
+                'explicacao': f"""
+                📊 CÁLCULO PASSO A PASSO:
+                
+                1️⃣ Data analisada: {data_exemplo} (dia {dia_teste})
+                2️⃣ Total de dias no mês: {ultimo_dia_mes}
+                3️⃣ Proporção: {dia_teste}/{ultimo_dia_mes} = {proporcao_dias:.4f} ({proporcao_dias*100:.2f}%)
+                
+                4️⃣ Índices:
+                   • Mês anterior: {indice_anterior}
+                   • Mês atual: {indice_mes}
+                   • Variação mensal: {variacao_mensal}
+                
+                5️⃣ Cálculo proporcional:
+                   • Variação proporcional: {variacao_mensal} × {proporcao_dias:.4f} = {variacao_proporcional:.3f}
+                   • Índice final: {indice_anterior} + {variacao_proporcional:.3f} = {indice_anterior + variacao_proporcional:.3f}
+                
+                ✅ RESULTADO: {round(indice_proporcional, 3)}
+                """
+            }
+            
+            return resultado
+            
+        except Exception as e:
+            return {
+                'erro': f"Erro no exemplo: {str(e)}",
+                'data_exemplo': data_exemplo,
+                'explicacao': """
+                ❌ Erro ao processar exemplo.
+                
+                Formato esperado: 'YYYY-MM-DD' (ex: '2023-01-10')
+                """
+            }
+
+    def _calcular_media_movel_12_meses(self, df_indices_sorted: pd.DataFrame, data_referencia: pd.Timestamp) -> float:
+        """
+        Calcula a média móvel dos últimos 12 meses do índice para uma data de referência.
+        
+        Parâmetros:
+        - df_indices_sorted: DataFrame com índices ordenados
+        - data_referencia: Data de referência para calcular a média móvel
+        
+        Retorna:
+        - float: Média móvel dos últimos 12 meses
+        """
+        # Encontrar índices dos últimos 12 meses anteriores à data de referência
+        periodo_referencia = pd.Period(data_referencia, freq='M')
+        
+        # Filtrar apenas índices anteriores à data de referência
+        mask_anterior = df_indices_sorted['periodo'] < periodo_referencia
+        
+        if not mask_anterior.any():
+            # Se não há dados anteriores, retornar o último índice disponível
+            st.warning("⚠️ **VOLTZ**: Não há dados anteriores para média móvel, usando último índice")
+            return df_indices_sorted['indice'].iloc[-1] if len(df_indices_sorted) > 0 else 1.0
+        
+        # Obter os últimos 12 registros (ou menos se não houver 12)
+        indices_anteriores = df_indices_sorted[mask_anterior].tail(12)
+        
+        if len(indices_anteriores) == 0:
+            st.warning("⚠️ **VOLTZ**: Nenhum índice anterior encontrado para média móvel")
+            return 1.0
+        
+        # DEBUG: Mostrar dados usados na média móvel
+        st.info(f"🔍 **DEBUG MÉDIA MÓVEL**: Usando {len(indices_anteriores)} meses para cálculo")
+        st.write("📊 **Períodos usados na média móvel:**")
+        st.dataframe(indices_anteriores[['periodo', 'indice']])
+        
+        # Calcular média móvel (incluindo valores negativos se existirem)
+        media_movel = indices_anteriores['indice'].mean()
+        
+        st.info(f"🔍 **DEBUG MÉDIA MÓVEL**: Média calculada: {media_movel:.6f}")
+        
+        # IMPORTANTE: Não forçar mínimo de 1.0 para permitir índices negativos
+        # return max(media_movel, 1.0)  # Comentado para permitir negativos
+        return media_movel  # Permitir valores negativos se existirem nos dados
+
     def calcular_correcao_monetaria_igpm(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calcula correção monetária usando IGP-M sobre o saldo devedor.
+        Calcula correção monetária usando IGP-M sobre o saldo devedor considerando proporção de dias.
         A correção é aplicada do VENCIMENTO até a DATA BASE.
-        ULTRA-OTIMIZADO: Todas as operações são vetorizadas com complexidade O(1) ou O(log n).
+        
+        DIFERENCIAL CRÍTICO: Para data de vencimento no meio do mês (ex: 10/01/2023),
+        considera apenas os 10 dias de janeiro no cálculo da correção do mês parcial.
+        
+        NOVA REGRA PARA ÍNDICE_BASE:
+        - Se data_base > último índice disponível: usa média móvel dos últimos 12 meses
+        - Se data_base = último dia do mês/ano da tabela: usa o último índice
+        - Se data_base < último índice: calcula proporcional como antes
+        
+        ULTRA-OTIMIZADO: Usa função genérica para cálculo proporcional de índices.
         """
         df = df.copy()
         
@@ -218,8 +592,8 @@ class CalculadorVoltz:
                 df['data_vencimento_limpa'] = pd.to_datetime(df['data_vencimento'], errors='coerce')
             else:
                 st.warning("⚠️ Data de vencimento não encontrada. Correção monetária não aplicada.")
-                df['correcao_monetaria'] = 0
-                df['fator_igpm'] = 1.0
+                df['correcao_monetaria_igpm'] = 0
+                df['fator_igpm_ate_data_base'] = 1.0
                 return df
         
         # Data base
@@ -227,188 +601,163 @@ class CalculadorVoltz:
         if isinstance(data_base, str):
             data_base = pd.to_datetime(data_base)
         
-        # Verificar se temos dados de índices econômicos carregados
-        if 'df_indices_economicos' not in st.session_state or st.session_state.df_indices_economicos.empty:
-            st.warning("⚠️ Dados de índices econômicos não carregados. Usando fator padrão.")
-            df['fator_igpm'] = 1.0
-            df['correcao_monetaria'] = 0
+        # Verificar se temos dados de índices IGP-M específicos para VOLTZ
+        df_indices = self._obter_dados_igpm_voltz()
+        if df_indices is None:
+            st.warning("⚠️ Dados de índices IGP-M não disponíveis. Usando fator padrão.")
+            df['fator_igpm_ate_data_base'] = 1.0
+            df['correcao_monetaria_igpm'] = 0
             return df
-        
-        # Preparar dados de índices para merge ultra-eficiente
-        df_indices = st.session_state.df_indices_economicos.copy()
-        
+
         # Verificar estrutura dos dados de índices
         if 'data' not in df_indices.columns or 'indice' not in df_indices.columns:
             st.warning("⚠️ Estrutura de dados de índices inválida para VOLTZ.")
-            df['fator_igpm'] = 1.0
-            df['correcao_monetaria'] = 0
+            df['fator_igpm_ate_data_base'] = 1.0
+            df['correcao_monetaria_igpm'] = 0
             return df
         
-        # OTIMIZAÇÃO CRÍTICA: Preparar lookup table otimizada O(log n)
+        # PREPARAR DADOS DE ÍNDICES PARA FUNÇÃO GENÉRICA
         df_indices['data'] = pd.to_datetime(df_indices['data'])
         df_indices['periodo'] = df_indices['data'].dt.to_period('M')
-        
-        # Criar lookup table ordenada para busca binária O(log n)
         df_indices_sorted = df_indices.sort_values('periodo').reset_index(drop=True)
+        
+        # ADICIONAR ÍNDICE ANTERIOR (SHIFT) PARA CÁLCULO PROPORCIONAL
+        df_indices_sorted['indice_anterior'] = df_indices_sorted['indice'].shift(1)
         df_indices_sorted['periodo_ordinal'] = df_indices_sorted['periodo'].map(lambda x: x.ordinal)
         
-        # VETORIZAÇÃO TOTAL: Criar período mensal para TODOS os vencimentos de uma vez
-        df['periodo_vencimento'] = df['data_vencimento_limpa'].dt.to_period('M')
-        df['periodo_venc_ordinal'] = df['periodo_vencimento'].map(lambda x: x.ordinal if pd.notna(x) else 0)
+        # Preencher primeiro índice anterior com o próprio índice (sem correção)
+        df_indices_sorted['indice_anterior'] = df_indices_sorted['indice_anterior'].fillna(df_indices_sorted['indice'])
         
-        # MERGE OTIMIZADO: Buscar índices usando merge_asof para O(log n) por grupo
-        # Primeiro, buscar índices exatos
-        df_com_indices = df.merge(
-            df_indices_sorted[['periodo', 'indice']].rename(columns={'indice': 'indice_vencimento'}),
-            left_on='periodo_vencimento',
-            right_on='periodo',
-            how='left'
-        ).drop(columns=['periodo'], errors='ignore')
+        # USAR FUNÇÃO GENÉRICA PARA CALCULAR ÍNDICES PROPORCIONAIS
+        df['data_vencimento_limpa'] = pd.to_datetime(df['data_vencimento_limpa'])
         
-        # VETORIZAÇÃO AVANÇADA: Para índices faltantes, usar merge_asof para busca do último anterior
-        mask_sem_indice = df_com_indices['indice_vencimento'].isna()
+        # Calcular índices proporcionais para datas de vencimento (VETORIZADO)
+        df['indice_vencimento'] = self.calcular_indices_proporcionais_vetorizado(
+            df['data_vencimento_limpa'], 
+            df_indices_sorted
+        )
         
-        if mask_sem_indice.sum() > 0:
-            # Criar DataFrame temporário apenas com registros sem índice
-            df_sem_indices = df_com_indices[mask_sem_indice].copy()
-            
-            # OPERAÇÃO VETORIZADA: merge_asof para buscar último índice anterior de forma eficiente
-            df_indices_lookup = df_indices_sorted[['periodo_ordinal', 'indice']].copy()
-            df_sem_indices_lookup = df_sem_indices[['periodo_venc_ordinal']].copy()
-            df_sem_indices_lookup = df_sem_indices_lookup.reset_index()
-            
-            # merge_asof: O(log n) para cada grupo, muito mais eficiente que loop
-            merged_indices = pd.merge_asof(
-                df_sem_indices_lookup.sort_values('periodo_venc_ordinal'),
-                df_indices_lookup.sort_values('periodo_ordinal'),
-                left_on='periodo_venc_ordinal',
-                right_on='periodo_ordinal',
-                direction='backward'
-            ).sort_values('index').set_index('index')
-            
-            # Atualizar índices faltantes de forma vetorizada
-            df_com_indices.loc[mask_sem_indice, 'indice_vencimento'] = merged_indices['indice'].fillna(1.0)
+        # NOVA LÓGICA PARA CALCULAR ÍNDICE BASE
+        # Encontrar o último índice disponível na tabela
+        ultimo_periodo_disponivel = df_indices_sorted['periodo'].max()
+        ultimo_registro = df_indices_sorted[df_indices_sorted['periodo'] == ultimo_periodo_disponivel].iloc[0]
+        ultimo_indice_disponivel = ultimo_registro['indice']
         
-        # Preencher qualquer valor restante com 1.0 (operação vetorizada)
-        df_com_indices['indice_vencimento'] = df_com_indices['indice_vencimento'].fillna(1.0)
-        
-        # BUSCAR ÍNDICE DA DATA BASE: Operação O(log n) única
-        periodo_base = pd.Period(data_base, freq='M')
-        periodo_base_ordinal = periodo_base.ordinal
-        
-        # Busca vetorizada do índice base
-        mask_indices_base = df_indices_sorted['periodo_ordinal'] <= periodo_base_ordinal
-        if mask_indices_base.any():
-            indice_base = df_indices_sorted[mask_indices_base].iloc[-1]['indice']
+        # Criar data do último dia do último mês disponível
+        ultimo_ano = ultimo_periodo_disponivel.year
+        ultimo_mes = ultimo_periodo_disponivel.month
+        if ultimo_mes == 12:
+            primeiro_dia_mes_seguinte = pd.Timestamp(year=ultimo_ano + 1, month=1, day=1)
         else:
-            indice_base = 1.0
-            st.warning("⚠️ Não foi possível encontrar índice para data base. Usando valor padrão.")
+            primeiro_dia_mes_seguinte = pd.Timestamp(year=ultimo_ano, month=ultimo_mes + 1, day=1)
+        ultimo_dia_mes_disponivel = primeiro_dia_mes_seguinte - pd.Timedelta(days=1)
         
-        # CÁLCULOS COMPLETAMENTE VETORIZADOS: O(1) para todo o dataset
-        df_com_indices['indice_base'] = indice_base
+        # Período da data base
+        periodo_data_base = pd.Period(data_base, freq='M')
         
-        # Evitar divisão por zero de forma vetorizada
-        mask_valido = df_com_indices['indice_vencimento'] > 0
-        df_com_indices['fator_igpm'] = np.where(
+        # DEBUG: Mostrar informações sobre os dados disponíveis
+        st.info(f"🔍 **DEBUG VOLTZ**: Último período disponível: {ultimo_periodo_disponivel}")
+        st.info(f"🔍 **DEBUG VOLTZ**: Último índice disponível: {ultimo_indice_disponivel}")
+        st.info(f"🔍 **DEBUG VOLTZ**: Último dia do mês disponível: {ultimo_dia_mes_disponivel.date()}")
+        st.info(f"🔍 **DEBUG VOLTZ**: Data base: {data_base.date()}")
+        st.info(f"🔍 **DEBUG VOLTZ**: Período data base: {periodo_data_base}")
+        st.info(f"🔍 **DEBUG VOLTZ**: Total de índices disponíveis: {len(df_indices_sorted)}")
+        
+        # Aplicar nova lógica para índice base
+        if periodo_data_base > ultimo_periodo_disponivel:
+            # Data base é maior que último índice: usar média móvel dos últimos 12 meses
+            indice_base_proporcional = self._calcular_media_movel_12_meses(df_indices_sorted, data_base)
+            st.success(f"✅ **VOLTZ**: Usando MÉDIA MÓVEL para índice base: {indice_base_proporcional:.6f}")
+        elif data_base.date() == ultimo_dia_mes_disponivel.date():
+            # Data base é igual ao último dia do mês/ano disponível: usar último índice
+            indice_base_proporcional = ultimo_indice_disponivel
+            st.success(f"✅ **VOLTZ**: Usando ÚLTIMO ÍNDICE para índice base: {indice_base_proporcional:.6f}")
+        else:
+            # Data base é anterior ou no meio do período: calcular proporcional como antes
+            indice_base_proporcional = self.calcular_indice_proporcional_data(
+                pd.to_datetime(data_base),
+                df_indices_sorted
+            )
+            st.success(f"✅ **VOLTZ**: Usando CÁLCULO PROPORCIONAL para índice base: {indice_base_proporcional:.6f}")
+        
+        # CÁLCULO DO FATOR DE CORREÇÃO (VETORIZADO)
+        mask_valido = df['indice_vencimento'] > 0
+        df['fator_igpm_ate_data_base'] = np.where(
             mask_valido,
-            df_com_indices['indice_base'] / df_com_indices['indice_vencimento'],
+            indice_base_proporcional / df['indice_vencimento'],
             1.0
         )
         
         # Garantir que o fator não seja menor que 1 (vetorizado)
-        df_com_indices['fator_igpm'] = np.maximum(df_com_indices['fator_igpm'], 1.0)
+        df['fator_igpm_ate_data_base'] = np.maximum(df['fator_igpm_ate_data_base'], 1.0)
         
         # Para contratos não vencidos, fator = 1 (operação vetorizada)
-        mask_nao_vencido = df_com_indices['data_vencimento_limpa'] >= data_base
-        df_com_indices.loc[mask_nao_vencido, 'fator_igpm'] = 1.0
+        mask_nao_vencido = df['data_vencimento_limpa'] >= data_base
+        df.loc[mask_nao_vencido, 'fator_igpm_ate_data_base'] = 1.0
         
         # Aplicar correção sobre saldo devedor (completamente vetorizado)
-        df_com_indices['correcao_monetaria'] = df_com_indices['saldo_devedor_vencimento'] * (df_com_indices['fator_igpm'] - 1)
+        df['correcao_monetaria_igpm'] = (
+            df['valor_liquido'] * (df['fator_igpm_ate_data_base'] - 1)
+        )
         
         # Garantir que não seja negativa (vetorizado)
-        df_com_indices['correcao_monetaria'] = np.maximum(df_com_indices['correcao_monetaria'], 0)
+        df['correcao_monetaria_igpm'] = np.maximum(df['correcao_monetaria_igpm'], 0)
         
-        # Limpar colunas auxiliares
-        df_final = df_com_indices.drop(columns=['periodo_vencimento', 'periodo_venc_ordinal'], errors='ignore')
+        # Adicionar campo de debug para validação
+        df['indice_base'] = indice_base_proporcional
         
-        return df_final
+        return df
     
     def identificar_status_contrato(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Identifica se o contrato está vencido ou a vencer.
-        ULTRA-OTIMIZADO: Cálculos de data usando NumPy puro para máxima performance.
+        Identifica status dos contratos usando cálculos vetorizados diretos.
         """
-        df = df.copy()
-        
         # Data base
         data_base = self.params.data_base_padrao
         if isinstance(data_base, str):
             data_base = pd.to_datetime(data_base)
         
-        # Garantir que temos data de vencimento
+        # Garantir data de vencimento
         if 'data_vencimento_limpa' not in df.columns:
             if 'data_vencimento' in df.columns:
                 df['data_vencimento_limpa'] = pd.to_datetime(df['data_vencimento'], errors='coerce')
             else:
-                # Operações vetorizadas para valores padrão
-                df['esta_vencido'] = np.full(len(df), False, dtype=bool)
-                df['dias_atraso'] = np.zeros(len(df), dtype=int)
-                df['meses_atraso'] = np.zeros(len(df), dtype=float)
+                df['esta_vencido'] = False
+                df['dias_atraso'] = 0
+                df['meses_atraso'] = 0.0
                 return df
         
-        # CÁLCULOS ULTRA-VETORIZADOS usando NumPy arrays
-        # Converter para timestamp para operações mais rápidas
-
+        # Cálculos vetorizados
         df['data_vencimento_limpa'] = pd.to_datetime(df['data_vencimento_limpa'])
-        data_base_dt = pd.to_datetime(data_base)
-
-        # Calcular diferença em dias diretamente
-        dias_diff = (data_base_dt - df['data_vencimento_limpa']).dt.total_seconds() / (24*60*60)
-
-        # Criar colunas de atraso e vencido
-        df['dias_atraso'] = np.where(dias_diff > 0, np.ceil(dias_diff), 0).astype(int)
+        dias_diff = (pd.to_datetime(data_base) - df['data_vencimento_limpa']).dt.days
+        
+        df['dias_atraso'] = np.maximum(dias_diff, 0)
         df['esta_vencido'] = df['dias_atraso'] > 0
+        df['meses_atraso'] = df['dias_atraso'] / 30
 
-        # Meses de atraso (operação vetorizada)
-        df['meses_atraso'] = df['dias_atraso'].values / 30.44
         
         return df
     
     def calcular_multa_voltz(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Identifica contratos vencidos para aplicação posterior da multa.
-        A multa será calculada sobre o saldo devedor no vencimento.
+        Calcula multa para contratos vencidos.
         """
-        df = df.copy()
-        
-        # Identificar status dos contratos
-        df = self.identificar_status_contrato(df)
-        
-        # Inicializar coluna de multa (será calculada posteriormente sobre saldo corrigido)
-        df['multa'] = 0
-        
+        df['multa'] = np.where(df['esta_vencido'], df['valor_liquido'] * self.taxa_multa, 0)
         return df
     
     def calcular_juros_moratorios_voltz(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Identifica contratos vencidos e calcula fator de juros moratórios.
-        Os juros serão aplicados sobre o saldo devedor no vencimento.
+        Calcula fator de juros moratórios para contratos vencidos.
         """
-        df = df.copy()
-        
-        # Garantir que temos o status e meses de atraso
         if 'meses_atraso' not in df.columns:
             df = self.identificar_status_contrato(df)
         
-        # Calcular fator de juros moratórios compostos apenas para vencidos
-        df['fator_juros_moratorios'] = np.where(
+        df['fator_juros_moratorios_ate_data_base'] = np.where(
             df['esta_vencido'],
-            (1 + self.taxa_juros_moratorios) ** df['meses_atraso'],
+            (self.taxa_juros_moratorios) * df['meses_atraso'],
             1.0
         )
-        
-        # Inicializar coluna de juros moratórios (será calculada posteriormente sobre saldo corrigido)
-        df['juros_moratorios'] = 0
+        df['juros_moratorios_ate_data_base'] = df['valor_liquido'] * (df['fator_juros_moratorios_ate_data_base'])
         
         return df
     
@@ -417,7 +766,7 @@ class CalculadorVoltz:
         Calcula valor corrigido final para VOLTZ seguindo a sequência CORRETA:
         
         ETAPA 1 - Valor base:
-        - Valor da parcela já inclui juros remuneratórios (4,65%) aplicados previamente
+        - Juros remuneratórios (4,65% a.m.) calculados do vencimento até data base
         - Saldo devedor no vencimento = Valor da parcela (sem adição de juros)
         
         ETAPA 2 - Pós-vencimento (apenas para VENCIDOS):
@@ -428,74 +777,108 @@ class CalculadorVoltz:
         
         ETAPA 3 - Para contratos A VENCER:
         - Saldo devedor no vencimento + correção IGP-M (do vencimento até data base)
-        
-        ULTRA-OTIMIZADO: Todas as operações são vetorizadas usando NumPy para O(1) complexity.
-        COM CHECKPOINT: Evita reprocessamento se dados não mudaram.
+
+        Cálculo vetorizado direto do valor corrigido VOLTZ.
         """
-        # Usar checkpoint para evitar reprocessamento desnecessário
-        return usar_checkpoint(
-            checkpoint_name="valor_corrigido_voltz",
-            funcao_processamento=self._calcular_valor_corrigido_voltz_interno,
-            dataframes={"df_principal": df},
-            parametros={
-                "taxa_multa": self.taxa_multa,
-                "taxa_juros_moratorios": self.taxa_juros_moratorios
-            },
-            df=df
-        )
-    
-    def _calcular_valor_corrigido_voltz_interno(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Implementação interna do cálculo de valor corrigido (sem checkpoint)
-        """
-        df = df.copy()
+        # Arrays NumPy diretos
+        esta_vencido = df['esta_vencido'].to_numpy()
+        saldo_nao_corrigido = df['valor_liquido'].to_numpy()
         
-        # PREPARAÇÃO ULTRA-EFICIENTE: Extrair arrays NumPy uma única vez
-        esta_vencido = df['esta_vencido'].values
-        saldo_devedor = df['saldo_devedor_vencimento'].values
-        fator_igpm = df['fator_igpm'].values
-        fator_juros_moratorios = df['fator_juros_moratorios'].values if 'fator_juros_moratorios' in df.columns else np.ones(len(df))
-        
-        # ETAPA 1: Base sempre é o saldo devedor no vencimento (já calculado)
-        
-        # CÁLCULOS COMPLETAMENTE VETORIZADOS usando NumPy
-        # Saldo corrigido pela IGP-M para TODOS os contratos de uma vez
-        saldo_corrigido_igpm = saldo_devedor * fator_igpm
-        
-        # ETAPA 2A: Contratos A VENCER - apenas saldo corrigido
-        # ETAPA 2B: Contratos VENCIDOS - saldo corrigido + encargos
-        
-        # Calcular multa vetorizada (2% sobre SALDO DEVEDOR NO VENCIMENTO, apenas para vencidos)
-        multa_array = np.where(esta_vencido, saldo_devedor * self.taxa_multa, 0)
-        
-        # Calcular juros moratórios vetorizados (sobre SALDO DEVEDOR NO VENCIMENTO, apenas para vencidos)
-        juros_moratorios_array = np.where(
-            esta_vencido,
-            saldo_devedor * (fator_juros_moratorios - 1),
+
+        # Cálculos vetorizados
+        multa = df.get('multa', pd.Series(0.0, index=df.index)).to_numpy()
+        juros_remuneratorios_ate_data_base = df['juros_remuneratorios_ate_data_base'].to_numpy()
+        juros_moratorios_ate_data_base = df.get('juros_moratorios_ate_data_base', pd.Series(0.0, index=df.index)).to_numpy()
+        correcao_igpm = df.get('correcao_monetaria_igpm', pd.Series(0.0, index=df.index)).to_numpy()
+
+        # Resultado final
+
+        df['valor_corrigido_ate_data_base'] = np.maximum(
+            saldo_nao_corrigido + juros_remuneratorios_ate_data_base 
+            + multa + juros_moratorios_ate_data_base + correcao_igpm,
             0
         )
         
-        # VALOR FINAL COMPLETAMENTE VETORIZADO
-        # Para todos os contratos: saldo corrigido + (multa + juros se vencido)
-        valor_corrigido_array = saldo_corrigido_igpm + multa_array + juros_moratorios_array
-        
-        # Garantir que não seja negativo (operação vetorizada)
-        valor_corrigido_array = np.maximum(valor_corrigido_array, 0)
-        
-        # ATRIBUIÇÃO EFICIENTE: Atualizar DataFrame com arrays NumPy
-        df['saldo_corrigido_igpm'] = saldo_corrigido_igpm
-        df['multa_sobre_corrigido'] = multa_array
-        df['juros_moratorios_sobre_corrigido'] = juros_moratorios_array
-        df['valor_corrigido'] = valor_corrigido_array
-        
-        # Manter compatibilidade com colunas originais usando operações vetorizadas
-        df['multa'] = multa_array
-        df['juros_moratorios'] = juros_moratorios_array
-        
-        # Informações de debug vetorizadas
-        df['tipo_calculo'] = 'VOLTZ'
-        df['status_contrato'] = np.where(esta_vencido, 'VENCIDO', 'A VENCER')
-        
+        # Verifica se a conta ao contrário da o mesmo número para a primeira linha
+        if df['valor_corrigido_ate_data_base'].iloc[0] == df['valor_liquido'].iloc[0]:
+            df['valor_corrigido_ate_data_base'].iloc[0] = df['valor_liquido'].iloc[0]
+
+        return df
+    
+    def reorganizar_colunas_voltz(self, df: pd.DataFrame) -> pd.DataFrame:
+        columns_reorder_first = [
+            'id_padronizado',
+            'empresa',
+            'nome_cliente',
+            'documento',
+            'contrato',
+            'data_vencimento',
+            'data_vencimento_limpa',
+            'data_base',
+            'aging',
+            'dias_atraso',
+            'meses_atraso',
+            'esta_vencido',
+            'valor_principal',
+            'valor_principal_limpo',
+            'valor_liquido',
+            'indice_vencimento',
+            'indice_base',
+            'juros_remuneratorios_ate_data_base',
+            'correcao_monetaria_igpm',
+            'multa',
+            'juros_moratorios_ate_data_base',
+            'valor_corrigido_ate_data_base',
+            'aging_taxa',
+            'taxa_recuperacao',
+            'meses_ate_recebimento',
+            'data_recebimento',
+            'ultima_data_igpm',
+            'variacao_ultima_competencia',
+            'indice_recebimento',
+            'juros_remuneratorios_recebimento',
+            'correcao_igpm_recebimento',
+            'juros_moratorios_recebimento',
+            'valor_corrigido_ate_recebimento',
+            'valor_recuperavel_ate_recebimento',
+            # Colunas de remuneração variável
+            'remuneracao_variavel_voltz_perc',
+            'remuneracao_variavel_voltz_valor',
+            'remuneracao_variavel_voltz_valor_final',
+            # Colunas de valor justo
+            'taxa_di_pre_total_anual',
+            'taxa_desconto_mensal',
+            'fator_de_desconto',
+            'valor_justo'
+        ]
+
+        # Lista de colunas para excluir
+        columns_to_exclude = [
+            'status',
+            'valor_nao_cedido',
+            'valor_terceiro',
+            'valor_cip',
+            'base_origem',
+            'fator_igpm_ate_data_base',
+            'fator_juros_moratorios_ate_data_base',
+            'tipo',
+            'valor_recuperavel_ate_data_base',
+            'indice_base_proporcional',
+            'fator_igpm_recebimento'
+        ]
+
+        # Remove as colunas indesejadas
+        df = df.drop(columns=columns_to_exclude, errors='ignore')
+
+        # Ordenação das primeiras colunas, evitando duplicatas
+        ordered_cols = columns_reorder_first + [col for col in df.columns if col not in columns_reorder_first]
+        df = df.loc[:, ordered_cols]
+
+        # Renomear colunas
+        df = df.rename(columns={
+            'remuneracao_variavel_voltz_valor_final': 'valor_recuperavel_pos_remuneracao_variavel',
+        })
+
         return df
     
     def processar_correcao_voltz_completa(self, df: pd.DataFrame, nome_base: str, df_taxa_recuperacao: pd.DataFrame = None) -> pd.DataFrame:
@@ -503,10 +886,13 @@ class CalculadorVoltz:
         Executa todo o processo de correção monetária específico para VOLTZ seguindo a ordem correta:
         
         1. Calcular valor líquido
-        2. Definir saldo devedor no vencimento (valor líquido já inclui juros remuneratórios de 4,65%)
-        3. Aplicar correção monetária IGP-M sobre saldo devedor
-        4. Para vencidos: adicionar multa (2%) e juros moratórios (1% a.m.)
-        5. Aplicar taxa de recuperação
+        2. Calcular juros remuneratórios (4,65% a.m.) do vencimento até data base
+        3. Identificar status dos contratos (vencido/a vencer)
+        4. Aplicar correção monetária IGP-M sobre saldo devedor
+        5. Para vencidos: adicionar multa (2%) e juros moratórios (1% a.m.)
+        6. Calcular valor corrigido final
+        7. Aplicar taxa de recuperação com merge triplo (Empresa + Tipo + Aging mapeado)
+        8. Calcular valor até data de recebimento (IGP-M + Juros moratórios projetados)
         """
         if df.empty:
             return df
@@ -516,144 +902,179 @@ class CalculadorVoltz:
         with st.spinner("🔄 Aplicando cálculos VOLTZ..."):
             # 1. Calcular valor líquido
             df = self.calcular_valor_liquido(df)
-            st.success("✅ Valor líquido calculado")
             
             # 2. Definir saldo devedor no vencimento (juros remuneratórios já inclusos no valor)
-            df = self.calcular_juros_remuneratorios_ate_vencimento(df)
-            st.success("✅ Saldo devedor definido (juros remuneratórios já inclusos no valor da parcela)")
-            
+            df = self.calcular_juros_remuneratorios_ate_data_base(df)
+            st.info("✅ Juros remuneratórios até a data base calculados.")
+
             # 3. Identificar status dos contratos (vencido/a vencer)
             df = self.identificar_status_contrato(df)
-            
+
             # 4. Calcular correção monetária IGP-M (do vencimento até data base)
             df = self.calcular_correcao_monetaria_igpm(df)
-            st.success("✅ Correção monetária IGP-M aplicada")
-            
+            st.info("✅ Correção monetária IGP-M até a data base calculada.")
+
             # 5. Para vencidos: calcular multa (2%) e juros moratórios (1% a.m.)
             df = self.calcular_multa_voltz(df)
             df = self.calcular_juros_moratorios_voltz(df)
-            
-            contratos_vencidos = df['esta_vencido'].sum()
-            if contratos_vencidos > 0:
-                st.success(f"✅ Multa e juros moratórios calculados para {contratos_vencidos} contratos vencidos")
-            
+            st.info("✅ Juros moratórios até a data base calculados.")
+
             # 6. Calcular valor corrigido final
             df = self.calcular_valor_corrigido_voltz(df)
-            
-            # 7. Aplicar taxa de recuperação
+            st.info("✅ Valor corrigido até a data base calculado.")
+
+            # 7. Aplicar taxa de recuperação (NOVO: antes do final)
             if df_taxa_recuperacao is not None and not df_taxa_recuperacao.empty:
                 df = self.aplicar_taxa_recuperacao_voltz(df, df_taxa_recuperacao)
-                st.success("✅ Taxa de recuperação aplicada")
-        
-        # 8. Gerar resumo
-        self.gerar_resumo_voltz(df, nome_base)
-        
+                st.success("✅ Taxa de recuperação aplicada.")
+            else:
+                st.error("❌ **ERRO VOLTZ**: Dados de taxa de recuperação não fornecidos ou inválidos!")
+                return None
+            
+            # 8. Calcular valor até data de recebimento
+            df = self.calcular_valor_ate_recebimento_voltz(df)
+            st.success("✅ Valor corrigido até a data de recebimento calculado.")
+
+            # 9. Calcular remuneração variável e valor justo VOLTZ
+            df = self.calcular_remuneracao_variavel_voltz(df)
+            st.success("✅ Remuneração variável e valor justo calculados.")
+
+            # Buscar taxa DI-PRE correspondente para cada linha
+            df = self._aplicar_taxa_di_pre(df, st.session_state.df_di_pre, 0.025)
+
+            # 10. Calcular valor justo usando taxa de desconto
+            df = self._calcular_valor_justo_com_desconto_voltz(df)
+
+            # 11. Reorganizar colunas para apresentação final
+            df = self.reorganizar_colunas_voltz(df)
+
+            # Exibir DataFrame final
+            st.subheader("📊 Resultado Final - VOLTZ")
+            st.dataframe(df, use_container_width=True)
+            
+            return df
+
         return df
+    
+    def mapear_aging_para_taxa_voltz(self, aging: str) -> str:
+        """
+        Mapeia aging detalhado da VOLTZ para categorias de taxa de recuperação.
+        Baseado na função mapear_aging_para_taxa do calculador_correcao.py
+        """
+        # Dicionário de mapeamento aging -> categoria taxa específico para VOLTZ
+        mapeamento = {
+            'A vencer': 'A vencer',
+            'Menor que 30 dias': 'Primeiro ano',
+            'De 31 a 59 dias': 'Primeiro ano', 
+            'De 60 a 89 dias': 'Primeiro ano',
+            'De 90 a 119 dias': 'Primeiro ano',
+            'De 120 a 359 dias': 'Primeiro ano',
+            'De 360 a 719 dias': 'Segundo ano',
+            'De 720 a 1080 dias': 'Terceiro ano',
+            'Maior que 1080 dias': 'Demais anos',
+            # Mapeamentos específicos da VOLTZ
+            'Primeiro ano': 'Primeiro ano',
+            'Segundo ano': 'Segundo ano', 
+            'Terceiro ano': 'Terceiro ano',
+            'Quarto ano': 'Quarto ano',
+            'Quinto ano': 'Quinto ano',
+            'Demais anos': 'Demais anos'
+        }
+        
+        return mapeamento.get(aging, 'Primeiro ano')  # Default para VOLTZ
     
     def aplicar_taxa_recuperacao_voltz(self, df: pd.DataFrame, df_taxa_recuperacao: pd.DataFrame = None) -> pd.DataFrame:
         """
-        Aplica taxa de recuperação específica para VOLTZ.
-        COM CHECKPOINT: Evita reprocessamento se dados não mudaram.
-        """
-        # Preparar DataFrames para checkpoint
-        dataframes = {"df_principal": df}
-        if df_taxa_recuperacao is not None and not df_taxa_recuperacao.empty:
-            dataframes["df_taxa_recuperacao"] = df_taxa_recuperacao
-        
-        return usar_checkpoint(
-            checkpoint_name="taxa_recuperacao_voltz",
-            funcao_processamento=self._aplicar_taxa_recuperacao_voltz_interno,
-            dataframes=dataframes,
-            parametros={"tem_taxa_recuperacao": df_taxa_recuperacao is not None},
-            df=df,
-            df_taxa_recuperacao=df_taxa_recuperacao
-        )
-    
-    def _aplicar_taxa_recuperacao_voltz_interno(self, df: pd.DataFrame, df_taxa_recuperacao: pd.DataFrame = None) -> pd.DataFrame:
-        """
         Implementação interna da aplicação de taxa de recuperação (sem checkpoint)
+        Implementa merge triplo: Empresa + Tipo + Aging mapeado
         """
         if df_taxa_recuperacao is None or df_taxa_recuperacao.empty:
-            st.info("ℹ️ Usando taxas de recuperação padrão para VOLTZ")
-            return self._aplicar_taxa_recuperacao_padrao(df)
+            st.error("❌ **ERRO VOLTZ**: Dados de taxa de recuperação não fornecidos ou inválidos!")
+            return None
         
         df = df.copy()
         
-        # Fazer merge com taxa de recuperação baseado em aging
-        if 'aging' in df.columns and 'Aging' in df_taxa_recuperacao.columns:
-            # Filtrar apenas taxas da VOLTZ se disponível
-            df_taxa_voltz = df_taxa_recuperacao[
-                df_taxa_recuperacao['Empresa'].str.upper() == 'VOLTZ'
-            ] if 'Empresa' in df_taxa_recuperacao.columns else df_taxa_recuperacao
-            
-            if not df_taxa_voltz.empty:
-                # Verificar quais colunas estão disponíveis
-                colunas_merge = ['Aging']
-                if 'Taxa de recuperação' in df_taxa_voltz.columns:
-                    colunas_merge.append('Taxa de recuperação')
-                if 'Prazo de recebimento' in df_taxa_voltz.columns:
-                    colunas_merge.append('Prazo de recebimento')
-                
-                # Fazer merge apenas com as colunas que existem
-                df = df.merge(
-                    df_taxa_voltz[colunas_merge],
-                    left_on='aging',
-                    right_on='Aging',
-                    how='left'
-                )
-                
-                # Preencher valores faltantes
-                df['Taxa de recuperação'] = df['Taxa de recuperação'].fillna(0.10)
-                df['taxa_recuperacao'] = df['Taxa de recuperação']
-                
-                # Limpar colunas
-                df = df.drop(columns=['Aging', 'Taxa de recuperação'], errors='ignore')
-            else:
-                return self._aplicar_taxa_recuperacao_padrao(df)
+        # ETAPA 1: MAPEAMENTO VETORIZADO - Aging detalhado → Categoria taxa
+        if 'aging' in df.columns:
+            df['aging_taxa'] = df['aging'].apply(self.mapear_aging_para_taxa_voltz)
         else:
-            return self._aplicar_taxa_recuperacao_padrao(df)
+            st.warning("⚠️ Coluna 'aging' não encontrada. Usando categoria padrão.")
+            df['aging_taxa'] = 'Primeiro ano'
         
-        # Calcular valor recuperável
-        df['valor_recuperavel'] = df['valor_corrigido'] * df['taxa_recuperacao']
+        # ETAPA 2: PREPARAR DADOS PARA MERGE TRIPLO
+        # Garantir que temos as colunas necessárias no DataFrame principal
+        if 'empresa' not in df.columns:
+            df['empresa'] = 'VOLTZ'  # Definir empresa como VOLTZ
+        
+        if 'tipo' not in df.columns:
+            df['tipo'] = 'CCB'  # Tipo padrão para VOLTZ (Cédula de Crédito Bancário)
+        
+        # ETAPA 3: FILTRAR DADOS DE TAXA PARA VOLTZ
+        df_taxa_voltz = df_taxa_recuperacao.copy()
+        
+        # Filtrar por empresa se a coluna existir
+        if 'Empresa' in df_taxa_voltz.columns:
+            df_taxa_voltz = df_taxa_voltz[
+                df_taxa_voltz['Empresa'].str.upper().isin(['VOLTZ', 'VOLT'])
+            ]
+        
+        # ETAPA 4: MERGE TRIPLO VETORIZADO (Empresa + Aging)
+        if not df_taxa_voltz.empty:
+            # Preparar colunas para merge
+            colunas_merge_left = ['empresa', 'aging_taxa']
+            colunas_merge_right = ['Empresa', 'Aging']
+            
+            # Colunas para manter do DataFrame de taxa
+            colunas_taxa = ['Taxa de recuperação'] if 'Taxa de recuperação' in df_taxa_voltz.columns else []
+            if 'Prazo de recebimento' in df_taxa_voltz.columns:
+                colunas_taxa.append('Prazo de recebimento')
+            
+            # Realizar merge vetorizado
+            df_merged = df.merge(
+                df_taxa_voltz[colunas_merge_right + colunas_taxa],
+                left_on=colunas_merge_left,
+                right_on=colunas_merge_right,
+                how='left'
+            )
+            
+            # Limpar colunas duplicadas do merge
+            colunas_para_remover = [col for col in colunas_merge_right if col in df_merged.columns]
+            df_merged = df_merged.drop(columns=colunas_para_remover, errors='ignore')
+            
+            # ETAPA 5: TRATAMENTO DE VALORES FALTANTES
+            if 'Taxa de recuperação' in df_merged.columns:
+                # Preencher valores faltantes com taxa conservadora para VOLTZ
+                df_merged['Taxa de recuperação'] = df_merged['Taxa de recuperação'].fillna(0.10)
+                df_merged['taxa_recuperacao'] = df_merged['Taxa de recuperação']
+                
+                # Remover coluna original
+                df_merged = df_merged.drop(columns=['Taxa de recuperação'], errors='ignore')
+            
+            # Tratar prazo de recebimento
+            if 'Prazo de recebimento' in df_merged.columns:
+                df_merged['meses_ate_recebimento'] = df_merged['Prazo de recebimento'].fillna(12)  # Default 12 meses
+                df_merged = df_merged.drop(columns=['Prazo de recebimento'], errors='ignore')
+            else:
+                df_merged['meses_ate_recebimento'] = 12  # Default se não encontrar coluna
+                
+            if 'taxa_recuperacao' not in df_merged.columns:
+                # Se não encontrou coluna de taxa, usar padrão
+                st.error("❌ **ERRO VOLTZ**: Dados de taxa de recuperação não encontrados nos dados. Revisar base de dados.")
+                return None
+            
+            df = df_merged
+        else:
+            st.error("❌ **ERRO VOLTZ**: Não foi possível identificar taxa de recuperação para VOLTZ.")
+            return None
+        
+        # ETAPA 6: CÁLCULO VETORIZADO DO VALOR RECUPERÁVEL
+        df['valor_recuperavel_ate_data_base'] = df['valor_corrigido_ate_data_base'] * df['taxa_recuperacao']
+        
+        # Garantir que não seja negativo
+        df['valor_recuperavel_ate_data_base'] = np.maximum(df['valor_recuperavel_ate_data_base'], 0)
         
         return df
-    
-    def _aplicar_taxa_recuperacao_padrao(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Aplica taxas de recuperação padrão específicas para VOLTZ.
-        OTIMIZADO: Usa merge para melhor performance ao invés de map.
-        """
-        df = df.copy()
-        
-        if 'aging' not in df.columns:
-            st.warning("⚠️ Coluna 'aging' não encontrada. Usando taxa padrão de 50%")
-            df['taxa_recuperacao'] = 0.50
-            df['valor_recuperavel'] = df['valor_corrigido'] * df['taxa_recuperacao']
-            return df
-        
-        # Criar DataFrame com taxas específicas para contratos CCB da VOLTZ
-        taxas_padrao_data = {
-            'aging': ['A vencer', 'Primeiro ano', 'Segundo ano', 'Terceiro ano', 
-                     'Quarto ano', 'Quinto ano', 'Demais anos'],
-            'taxa_recuperacao': [0.98, 0.90, 0.75, 0.60, 0.45, 0.30, 0.15]
-        }
-        df_taxas_padrao = pd.DataFrame(taxas_padrao_data)
-        
-        # Fazer merge para aplicar taxas
-        df_com_taxas = df.merge(
-            df_taxas_padrao,
-            on='aging',
-            how='left'
-        )
-        
-        # Preencher valores não mapeados com taxa conservadora (10%)
-        df_com_taxas['taxa_recuperacao'] = df_com_taxas['taxa_recuperacao'].fillna(0.10)
-        
-        # Calcular valor recuperável
-        df_com_taxas['valor_recuperavel'] = df_com_taxas['valor_corrigido'] * df_com_taxas['taxa_recuperacao']
-        
-        return df_com_taxas
-    
+
     def gerar_resumo_voltz(self, df: pd.DataFrame, nome_base: str):
         """
         Gera resumo específico para VOLTZ com visualização clara dos cálculos.
@@ -688,16 +1109,16 @@ class CalculadorVoltz:
             st.metric("💵 Valor Principal", f"R$ {valor_principal:,.2f}")
         
         with col2:
-            juros_rem = df['juros_remuneratorios'].sum()
+            juros_rem = df['juros_remuneratorios_ate_data_base'].sum()
             st.metric("📈 Juros Adicionais (R$0)", f"R$ {juros_rem:,.2f}")
             st.caption("Juros remuneratórios já inclusos no valor da parcela")
         
         with col3:
-            saldo_venc = df['saldo_devedor_vencimento'].sum()
+            saldo_venc = df['valor_corrigido_ate_data_base'].sum()
             st.metric("💰 Saldo no Vencimento", f"R$ {saldo_venc:,.2f}")
         
         with col4:
-            correcao = df['correcao_monetaria'].sum()
+            correcao = df['correcao_monetaria_igpm'].sum()
             st.metric("📊 Correção IGP-M", f"R$ {correcao:,.2f}")
         
         # Valores adicionais (apenas vencidos)
@@ -712,7 +1133,7 @@ class CalculadorVoltz:
                 st.metric("⚖️ Multa (2%)", f"R$ {multa_total:,.2f}")
             
             with col2:
-                juros_mor = df_vencidos['juros_moratorios'].sum()
+                juros_mor = df_vencidos['juros_moratorios_ate_data_base'].sum()
                 st.metric("📈 Juros Moratórios (1%)", f"R$ {juros_mor:,.2f}")
             
             with col3:
@@ -726,12 +1147,56 @@ class CalculadorVoltz:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            valor_corrigido = df['valor_corrigido'].sum()
-            st.metric("💎 Valor Corrigido Total", f"R$ {valor_corrigido:,.2f}")
+            valor_corrigido = df['valor_corrigido_ate_data_base'].sum()
+            st.metric("💎 Valor Corrigido (Data Base)", f"R$ {valor_corrigido:,.2f}")
         
         with col2:
-            valor_recuperavel = df['valor_recuperavel'].sum()
-            st.metric("💰 Valor Recuperável", f"R$ {valor_recuperavel:,.2f}")
+            valor_recuperavel = df['valor_recuperavel_ate_data_base'].sum() if 'valor_recuperavel_ate_data_base' in df.columns else 0
+            st.metric("💰 Valor Recuperável (Data Base)", f"R$ {valor_recuperavel:,.2f}")
+            
+            # Mostrar taxa média aplicada se disponível
+            if 'taxa_recuperacao' in df.columns and len(df) > 0:
+                taxa_media = df['taxa_recuperacao'].mean() * 100
+                st.caption(f"Taxa média: {taxa_media:.1f}%")
+        
+        with col3:
+            valor_corrigido_recebimento = df['valor_corrigido_ate_recebimento'].sum() if 'valor_corrigido_ate_recebimento' in df.columns else 0
+            st.metric("🚀 Valor Corrigido até Recebimento", f"R$ {valor_corrigido_recebimento:,.2f}")
+            
+            if valor_corrigido > 0 and valor_corrigido_recebimento > 0:
+                crescimento_pct = ((valor_corrigido_recebimento / valor_corrigido) - 1) * 100
+                st.caption(f"Crescimento: +{crescimento_pct:.1f}%")
+        
+        # Nova seção: Detalhamento até Recebimento
+        if 'valor_recuperavel_recebimento' in df.columns:
+            st.divider()
+            st.subheader("📈 Detalhamento até Recebimento")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                juros_rem_receb = df['juros_remuneratorios_recebimento'].sum() if 'juros_remuneratorios_recebimento' in df.columns else 0
+                st.metric("📈 Juros Remuneratórios Adicionais", f"R$ {juros_rem_receb:,.2f}")
+                st.caption("4,65% a.m. (Data Base → Recebimento)")
+            
+            with col2:
+                correcao_adicional = df['correcao_igpm_recebimento'].sum() if 'correcao_igpm_recebimento' in df.columns else 0
+                st.metric("📊 Correção IGP-M Adicional", f"R$ {correcao_adicional:,.2f}")
+                st.caption("IGP-M proporcional adicional")
+            
+            with col3:
+                juros_adicional = df['juros_moratorios_recebimento'].sum() if 'juros_moratorios_recebimento' in df.columns else 0
+                st.metric("⚖️ Juros Moratórios Adicionais", f"R$ {juros_adicional:,.2f}")
+                st.caption("1% a.m. para vencidos")
+            
+            with col4:
+                valor_recuperavel_receb = df['valor_recuperavel_recebimento'].sum()
+                st.metric("💎 Valor Recuperável Final", f"R$ {valor_recuperavel_receb:,.2f}")
+                
+                if valor_recuperavel > 0:
+                    incremento_pct = ((valor_recuperavel_receb / valor_recuperavel) - 1) * 100
+                    st.caption(f"Incremento: +{incremento_pct:.1f}%")
+                    st.metric("🚀 Incremento Recuperável", f"+{incremento_pct:.1f}%")
 
         
         # Resumo das regras aplicadas
@@ -740,27 +1205,145 @@ class CalculadorVoltz:
         **🔍 Regras VOLTZ Aplicadas (Sequência Correta):**
         
         **📋 ETAPA 1 - Valor Base (TODOS):**
-        - ✅ Valor da Parcela: Já inclui juros remuneratórios de 4,65% aplicados previamente
+        - ✅ Juros Remuneratórios: 4,65% a.m. calculados do vencimento até data base
         - ✅ Saldo Devedor no Vencimento = Valor da Parcela (juros já inclusos)
         
-        **📋 ETAPA 2A - Contratos A VENCER:**
-        - ✅ Correção IGP-M: aplicada sobre saldo devedor (do vencimento até data base)
-        - ✅ Valor Final = Saldo Devedor Corrigido
+        **📋 ETAPA 2 - Correção Temporal PROPORCIONAL (TODOS):**
+        - ✅ **NOVO**: Correção IGP-M Proporcional por Dias
+        - 🎯 **DIFERENCIAL CRÍTICO**: Para vencimento dia 10/01/2023:
+          • Janeiro tem 31 dias → Proporção: 10/31 = 32.26%
+          • Índice proporcional = Índice_Dez + (Índice_Jan - Índice_Dez) × 0.3226
+          • Aplicado tanto para data vencimento quanto data base
+        - ✅ Correção aplicada sobre saldo devedor (vencimento → data base)
         
-        **📋 ETAPA 2B - Contratos VENCIDOS:**
-        - ✅ Correção IGP-M: aplicada sobre saldo devedor (do vencimento até data base)
-        - ✅ Multa: 2% sobre saldo corrigido pela IGP-M
-        - ✅ Juros Moratórios: 1,0% a.m. sobre saldo corrigido pela IGP-M
-        - ✅ Valor Final = Saldo Corrigido + Multa + Juros Moratórios
+        **📋 ETAPA 3A - Contratos A VENCER:**
+        - ✅ Valor Corrigido = Saldo Devedor + Correção IGP-M Proporcional
+        
+        **📋 ETAPA 3B - Contratos VENCIDOS:**
+        - ✅ Correção IGP-M Proporcional aplicada sobre saldo devedor
+        - ✅ Valor Corrigido = Saldo Corrigido + Multa + Juros Moratórios
+        
+        **📋 ETAPA 4 - Taxa de Recuperação (TODOS):**
+        - ✅ Mapeamento Aging: Aging detalhado → Categoria de taxa
+        - ✅ Merge Triplo: Empresa (VOLTZ) + Tipo (CCB) + Aging mapeado
+        - ✅ Valor Recuperável = Valor Corrigido × Taxa de Recuperação
+        
+        **📋 ETAPA 5 - Projeção até Recebimento PROPORCIONAL (TODOS):**
+        - ✅ Data Recebimento = Data Base + Prazo de Recebimento (meses)
+        - ✅ **NOVO**: Juros Remuneratórios Adicionais (4,65% a.m.) até Data Recebimento
+        - ✅ **NOVO**: Correção IGP-M Proporcional Adicional (Data Base → Data Recebimento)
+        - ✅ **INOVAÇÃO 2025**: Extrapolação Inteligente para Datas Futuras
+          • Se Data Recebimento > Última Data IGP-M: usa variação da última competência
+          • **PROTEÇÃO**: Variações negativas são consideradas zero (sem crescimento)
+          • Aplica variação mensal constante mês a mês até data de recebimento
+          • Mantém cálculo proporcional para meses parciais na data final
+        - ✅ Juros Moratórios Adicionais: 1% a.m. para vencidos (Data Base → Recebimento)
+        - ✅ **Valor Corrigido até Recebimento** = Valor Corrigido + Juros Remuneratórios + IGP-M + Juros Moratórios
+        - ✅ Valor Recuperável Final = Valor Corrigido até Recebimento × Taxa de Recuperação
+        
+        **📊 COLUNAS DE RACIONAL (AUDITORIA):**
+        - ✅ `ultima_data_igpm`: Última data disponível nos dados IGP-M
+        - ✅ `variacao_ultima_competencia`: Variação % da última competência
+        - ✅ `metodo_calculo`: "Histórico" ou "Extrapolação"
+        - ✅ `indice_base_proporcional`: Índice da data base (proporcional)
+        - ✅ `indice_recebimento`: Índice da data de recebimento (calculado)
         
         **🎯 CARACTERÍSTICAS ESPECIAIS:**
         - 📍 Fonte de dados: Aba específica 'IGPM' (não IGPM_IPCA)
         - 📍 Sempre IGP-M (nunca IPCA, mesmo após 2021)
         - 💼 Contratos CCBs (Cédulas de Crédito Bancário)
-        - 💡 **IMPORTANTE**: Juros remuneratórios (4,65%) já estão no valor da parcela
-        - 🎯 Encargos calculados sobre valor corrigido pela IGP-M
-        - ⚡ **SISTEMA OTIMIZADO**: Processamento vetorizado com merges eficientes
+        - 💡 **IMPORTANTE**: Juros remuneratórios (4,65% a.m.) calculados do vencimento até data base
+        - 🎯 Encargos calculados sobre valor corrigido pela IGP-M proporcional
+        - 🔗 **MERGE TRIPLO**: Taxa de recuperação baseada em 3 chaves (Empresa + Tipo + Aging)
+        - ⚡ **SISTEMA ULTRA-OTIMIZADO**: Funções genéricas reutilizáveis + processamento vetorizado
+        - 🚀 **INOVAÇÃO**: Cálculo proporcional de dias para máxima precisão temporal
+        
+        **📐 FÓRMULA DE CÁLCULO PROPORCIONAL:**
+        ```
+        Para data D no mês M:
+        
+        1. Proporção = Dia_D / Total_Dias_Mês_M
+        2. Variação_Mensal = Índice_M - Índice_M-1
+        3. Variação_Proporcional = Variação_Mensal × Proporção
+        4. Índice_Proporcional = Índice_M-1 + Variação_Proporcional
+        
+        Exemplo: 10/01/2023
+        • Proporção = 10/31 = 0.3226
+        • Se Índice_Dez = 100.0 e Índice_Jan = 105.0
+        • Variação = 5.0 × 0.3226 = 1.613
+        • Índice = 100.0 + 1.613 = 101.613
+        ```
+        
+        **🚀 FÓRMULA DE EXTRAPOLAÇÃO (DATAS FUTURAS):**
+        ```
+        Para data D além da última data IGP-M disponível:
+        
+        1. Variação_Base = (Último_Índice / Penúltimo_Índice) - 1
+        2. Meses_Diferença = Períodos entre última data e data D
+        3. Índice_Extrapolado = Último_Índice × (1 + Variação_Base)^Meses_Diferença
+        4. Se data D não for último dia: aplicar proporção de dias
+        
+        Exemplo: Data recebimento 15/03/2025, última data IGP-M 31/12/2024
+        • Última variação: 2.5% (dez/2024)
+        • Meses: 3 (jan, fev, mar/2025)
+        • Índice base: 150.0 × (1.025)³ = 161.55
+        • Proporção mar: 15/31 = 0.4839
+        • Índice final: 159.77 + (161.55-159.77) × 0.4839 = 160.63
+        ```
         """)
+        
+        # Botão para demonstração do cálculo proporcional
+        if st.button("📊 Ver Exemplo de Cálculo Proporcional", key="exemplo_proporcional_voltz"):
+            exemplo = self.exemplo_calculo_proporcional("2023-01-10")
+            
+            st.subheader("🧮 Demonstração: Cálculo Proporcional de Índices")
+            
+            if 'erro' not in exemplo:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric("📅 Data Exemplo", exemplo['data_exemplo'])
+                    st.metric("📊 Dia no Mês", f"{exemplo['dia_no_mes']}/{exemplo['total_dias_mes']}")
+                    st.metric("⚖️ Proporção", f"{exemplo['proporcao_percentual']}%")
+                    st.metric("📈 Índice Final", exemplo['indice_proporcional_funcao'])
+                
+                with col2:
+                    st.metric("📉 Índice Anterior", exemplo['indice_mes_anterior'])
+                    st.metric("📈 Índice Atual", exemplo['indice_mes_atual'])
+                    st.metric("🔄 Variação Mensal", exemplo['variacao_mensal'])
+                    st.metric("⚡ Variação Proporcional", exemplo['variacao_proporcional'])
+                
+                st.text_area("📋 Explicação Detalhada", exemplo['explicacao'], height=400)
+            else:
+                st.error(exemplo['explicacao'])
+        
+        # Botão para demonstração da extrapolação
+        if st.button("🚀 Ver Exemplo de Extrapolação para Datas Futuras", key="exemplo_extrapolacao_voltz"):
+            exemplo_ext = self.exemplo_extrapolacao_igpm("2025-03-15")
+            
+            st.subheader("🚀 Demonstração: Extrapolação de Índices para Datas Futuras")
+            
+            if 'erro' not in exemplo_ext:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric("📅 Data Recebimento", exemplo_ext['data_exemplo'])
+                    st.metric("📊 Última Data IGP-M", exemplo_ext['ultima_data_igpm'])
+                    st.metric("📈 Último Índice", exemplo_ext['ultimo_indice'])
+                    st.metric("📉 Penúltimo Índice", exemplo_ext['penultimo_indice'])
+                    st.metric("📊 Variação Base", exemplo_ext['variacao_percentual_ultima'])
+                
+                with col2:
+                    st.metric("🔢 Meses Extrapolação", exemplo_ext['meses_extrapolacao'])
+                    st.metric("🚀 Índice Extrapolado", exemplo_ext['indice_extrapolado_completo'])
+                    st.metric("📅 Dia/Total Dias", f"{exemplo_ext['dia_no_mes']}/{exemplo_ext['total_dias_mes']}")
+                    st.metric("⚖️ Proporção", f"{exemplo_ext['proporcao_percentual']}%")
+                    st.metric("✅ Índice Final", exemplo_ext['indice_final_extrapolado'])
+                
+                st.text_area("📋 Explicação Detalhada - Extrapolação", exemplo_ext['explicacao'], height=500)
+            else:
+                st.error(exemplo_ext['explicacao'])
+
         
         return df
     
@@ -788,8 +1371,8 @@ class CalculadorVoltz:
         if 'aging' in df.columns:
             metrics['aging_categorias'] = df['aging'].nunique()
         
-        if 'valor_corrigido' in df.columns:
-            metrics['valor_total_mb'] = df['valor_corrigido'].sum() / 1_000_000
+        if 'valor_corrigido_ate_data_base' in df.columns:
+            metrics['valor_total_mb'] = df['valor_corrigido_ate_data_base'].sum() / 1_000_000
         
         return metrics
     
@@ -995,48 +1578,396 @@ class CalculadorVoltz:
         
         st.success("🎉 Benchmark concluído! Sistema otimizado para operações vetorizadas de alta performance.")
     
+    def calcular_valor_ate_recebimento_voltz(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcula valor até data de recebimento usando operações vetoriais puras.
+        
+        Processo:
+        1. Data recebimento = Data base + meses (vetorizado)
+        2. Busca índices IGP-M (merge otimizado)  
+        3. Aplicação de fatores (NumPy arrays)
+        4. Cálculo final (operações matriciais)
+        """
+        df = df.copy()
+        
+        # Data base
+        data_base = getattr(self.params, 'data_base_padrao', datetime.now())
+        if isinstance(data_base, str):
+            data_base = pd.to_datetime(data_base)
+        
+        # 1. CALCULAR DATAS DE RECEBIMENTO (vetorizado)
+        if 'meses_ate_recebimento' not in df.columns:
+            df = self._calcular_meses_ate_recebimento(df, data_base)
+
+        # Usar DateOffset para adicionar meses corretamente
+        df['data_recebimento'] = pd.to_datetime(data_base) + pd.to_timedelta(df['meses_ate_recebimento'] * 30, unit='days')
+
+        # 2. BUSCAR ÍNDICES IGP-M (operação única)
+        df_indices_igpm = self._obter_dados_igpm_voltz()
+        if df_indices_igpm is None:
+            st.error("❌ **ERRO VOLTZ**: Dados de índices IGP-M não disponíveis.")
+            return None
+        else:
+            # Com dados: cálculo otimizado
+            df = self._aplicar_indices_recebimento(df, data_base)
+            st.info("✅ Índices IGP-M aplicados vetorialmente.")
+            
+            # Juros moratórios adicionais (só para vencidos)
+            meses_adicionais = df['meses_ate_recebimento'].values
+            esta_vencido = df['esta_vencido'].values if 'esta_vencido' in df.columns else np.zeros(len(df), dtype=bool)
+            valores_corrigidos = df['valor_corrigido_ate_data_base'].values
+            
+            fatores_juros = np.where(
+                esta_vencido & (meses_adicionais > 0),
+                self.taxa_juros_moratorios * meses_adicionais,
+                0.0
+            )
+            df['juros_moratorios_recebimento'] = np.where(esta_vencido, valores_corrigidos * fatores_juros, 0)
+            st.info("✅ Juros moratórios adicionais calculados vetorialmente.")
+        
+        # 2.5. CALCULAR JUROS REMUNERATÓRIOS ATÉ DATA DE RECEBIMENTO (TODOS OS CONTRATOS)
+        # Taxa de juros remuneratórios: 4,65% a.m.
+        taxa_juros_remuneratorios = 0.0465
+        
+        # Calcular diferença em meses (data_base → data_recebimento)
+        dias_diff_recebimento = (df['data_recebimento'] - pd.to_datetime(data_base)).dt.days
+        meses_diff_recebimento = dias_diff_recebimento / 30
+        
+        # Garantir que não seja negativo
+        meses_para_juros_recebimento = np.maximum(meses_diff_recebimento, 0)
+        
+        # Calcular fator de juros compostos vetorizado
+        fator_juros_recebimento = np.power(1 + taxa_juros_remuneratorios, meses_para_juros_recebimento)
+        
+        # Aplicar juros sobre valor corrigido até data base
+        valores_base = df['valor_corrigido_ate_data_base'].values
+        valores_com_juros_recebimento = valores_base * fator_juros_recebimento
+        
+        # Calcular juros remuneratórios adicionais (diferença)
+        df['juros_remuneratorios_recebimento'] = valores_com_juros_recebimento - valores_base
+        df['juros_remuneratorios_recebimento'] = np.maximum(df['juros_remuneratorios_recebimento'], 0)
+        st.info("✅ Juros remuneratórios até recebimento calculados (4,65% a.m.).")
+        
+        # 3. CÁLCULO FINAL VETORIZADO - VALOR CORRIGIDO ATÉ RECEBIMENTO
+        df['valor_corrigido_ate_recebimento'] = (
+            df['valor_corrigido_ate_data_base'] + 
+            df['juros_remuneratorios_recebimento'] + 
+            df['correcao_igpm_recebimento'] + 
+            df['juros_moratorios_recebimento']
+        )
+        df['valor_corrigido_ate_recebimento'] = np.maximum(df['valor_corrigido_ate_recebimento'], 0)
+
+        # 4. Valor Recuperavel ate recebimento
+        df['valor_recuperavel_ate_recebimento'] = (
+            df['valor_corrigido_ate_recebimento'] * df['taxa_recuperacao']
+        )
+
+        df['valor_recuperavel_ate_recebimento'] = np.maximum(df['valor_recuperavel_ate_recebimento'], 0)
+
+        return df
+    
+    def _aplicar_indices_recebimento(self, df: pd.DataFrame, data_base: datetime) -> pd.DataFrame:
+        """
+        Aplica índices IGP-M com lógica proporcional de dias, calculando da data_base até data_recebimento.
+        
+        NOVA REGRA IMPLEMENTADA:
+        - Se data_recebimento > última data IGP-M: extrapola usando variação mensal da última competência
+        - Mantém cálculo proporcional para meses parciais
+        """
+        df = df.copy()
+        
+        # Verificar se temos dados de índices IGP-M específicos para VOLTZ
+        df_indices = self._obter_dados_igpm_voltz()
+        if df_indices is None:
+            st.error("❌ **ERRO VOLTZ**: Dados de índices IGP-M não disponíveis para cálculo.")
+            return None
+        
+        # Verificar estrutura dos dados
+        if 'data' not in df_indices.columns or 'indice' not in df_indices.columns:
+            st.error("❌ **ERRO VOLTZ**: Estrutura dos dados de índices IGP-M inválida.")
+            return None
+
+        # PREPARAR DADOS DE ÍNDICES PARA FUNÇÃO GENÉRICA
+        df_indices['data'] = pd.to_datetime(df_indices['data'])
+        df_indices['periodo'] = df_indices['data'].dt.to_period('M')
+        df_indices_sorted = df_indices.sort_values('periodo').reset_index(drop=True)
+        
+        # ADICIONAR ÍNDICE ANTERIOR (SHIFT) PARA CÁLCULO PROPORCIONAL
+        df_indices_sorted['indice_anterior'] = df_indices_sorted['indice'].shift(1)
+        df_indices_sorted['periodo_ordinal'] = df_indices_sorted['periodo'].map(lambda x: x.ordinal)
+        
+        # Preencher primeiro índice anterior
+        df_indices_sorted['indice_anterior'] = df_indices_sorted['indice_anterior'].fillna(df_indices_sorted['indice'])
+        
+        # CALCULAR VARIAÇÃO MENSAL DA ÚLTIMA COMPETÊNCIA (para extrapolação)
+        ultimo_indice = df_indices_sorted.iloc[-1]['indice']
+        penultimo_indice = df_indices_sorted.iloc[-2]['indice'] if len(df_indices_sorted) > 1 else ultimo_indice
+        variacao_mensal_ultima = (ultimo_indice / penultimo_indice) - 1
+        
+        # PROTEÇÃO: Se variação for negativa, considerar zero (sem crescimento)
+        if variacao_mensal_ultima < 0:
+            variacao_mensal_ultima = 0.0
+        
+        # USAR FUNÇÃO GENÉRICA PARA CALCULAR ÍNDICES PROPORCIONAIS
+        
+        # Calcular índice proporcional para data base (ÚNICA EXECUÇÃO)
+        indice_base_proporcional = self.calcular_indice_proporcional_data(
+            pd.to_datetime(data_base),
+            df_indices_sorted
+        )
+        
+        # VERIFICAÇÃO CRÍTICA: Se data_recebimento > última data IGP-M
+        ultima_data_igpm = df_indices_sorted['data'].max()
+        ultima_periodo = df_indices_sorted['periodo'].max()
+        
+        # Calcular índices proporcionais para datas de recebimento (VETORIZADO)
+        df['data_recebimento'] = pd.to_datetime(df['data_recebimento'])
+        
+        # Separar datas em duas categorias: dentro dos dados históricos e além
+        mask_alem_dados = df['data_recebimento'] > ultima_data_igpm
+        
+        # CATEGORIA 1: Datas dentro dos dados históricos (usar função existente)
+        mask_dentro_dados = ~mask_alem_dados
+        indices_dentro = pd.Series(1.0, index=df.index)
+        
+        if mask_dentro_dados.any():
+            indices_dentro[mask_dentro_dados] = self.calcular_indices_proporcionais_vetorizado(
+                df.loc[mask_dentro_dados, 'data_recebimento'], 
+                df_indices_sorted
+            )
+        
+        # CATEGORIA 2: Datas além dos dados históricos (extrapolação com regra nova)
+        indices_alem = pd.Series(1.0, index=df.index)
+        
+        if mask_alem_dados.any():
+            for idx in df[mask_alem_dados].index:
+                data_recebimento = df.at[idx, 'data_recebimento']
+                indice_extrapolado = self._calcular_indice_extrapolado(
+                    data_recebimento, 
+                    ultima_data_igpm, 
+                    ultimo_indice, 
+                    variacao_mensal_ultima
+                )
+                indices_alem.at[idx] = indice_extrapolado
+        
+        # ADICIONAR COLUNAS DE RACIONAL
+        df['ultima_data_igpm'] = ultima_data_igpm
+        df['variacao_ultima_competencia'] = f"{variacao_mensal_ultima * 100:.2f}%"
+        # df['metodo_calculo'] = np.where(mask_alem_dados, 'Extrapolação', 'Histórico')
+        df['indice_base_proporcional'] = indice_base_proporcional
+        
+        # COMBINAR RESULTADOS
+        df['indice_recebimento'] = np.where(
+            mask_alem_dados,
+            indices_alem,
+            indices_dentro
+        )
+        
+        # CALCULAR FATOR IGP-M (data_base → data_recebimento)
+        mask_valido = df['indice_recebimento'] > 0
+        df['fator_igpm_recebimento'] = np.where(
+            mask_valido,
+            df['indice_recebimento'] / indice_base_proporcional,
+            1.0
+        )
+        
+        # Garantir fator >= 1
+        df['fator_igpm_recebimento'] = np.maximum(df['fator_igpm_recebimento'], 1.0)
+        
+        # CALCULAR CORREÇÕES
+        valores_corrigidos = df['valor_corrigido_ate_data_base'].values
+        fatores_igmp = df['fator_igpm_recebimento'].values
+        
+        # Correção IGP-M adicional
+        df['correcao_igpm_recebimento'] = valores_corrigidos * (fatores_igmp - 1)
+        
+        return df
+    
+    def _calcular_indice_extrapolado(self, data_recebimento: pd.Timestamp, ultima_data_igpm: pd.Timestamp, 
+                                   ultimo_indice: float, variacao_mensal_ultima: float) -> float:
+        """
+        Calcula índice extrapolado para datas além da última data disponível do IGP-M.
+        
+        REGRA IMPLEMENTADA:
+        1. Usar variação mensal da última competência como taxa de crescimento constante
+        2. Aplicar essa variação mês a mês até o mês da data de recebimento
+        3. Se a data de recebimento não for no último dia do mês, aplicar proporção de dias
+        
+        Parâmetros:
+        - data_recebimento: Data final para cálculo
+        - ultima_data_igpm: Última data disponível nos dados IGP-M
+        - ultimo_indice: Último índice disponível
+        - variacao_mensal_ultima: Variação percentual da última competência
+        
+        Retorna:
+        - float: Índice extrapolado
+        """
+        # Converter para períodos para facilitar cálculos
+        periodo_ultima_data = pd.Period(ultima_data_igpm, freq='M')
+        periodo_recebimento = pd.Period(data_recebimento, freq='M')
+        
+        # Calcular quantos meses completos após a última data
+        meses_diferenca = periodo_recebimento.ordinal - periodo_ultima_data.ordinal
+        
+        if meses_diferenca == 0:
+            # Mesma competência - sem extrapolação necessária
+            return ultimo_indice
+        
+        # ETAPA 1: Aplicar variação mensal para meses completos
+        indice_base_extrapolado = ultimo_indice
+        for _ in range(meses_diferenca):
+            indice_base_extrapolado = indice_base_extrapolado * (1 + variacao_mensal_ultima)
+        
+        # ETAPA 2: Aplicar proporção de dias se não for último dia do mês
+        dia_recebimento = data_recebimento.day
+        
+        # Calcular último dia do mês de recebimento
+        if data_recebimento.month == 12:
+            primeiro_dia_mes_seguinte = pd.Timestamp(year=data_recebimento.year + 1, month=1, day=1)
+        else:
+            primeiro_dia_mes_seguinte = pd.Timestamp(year=data_recebimento.year, month=data_recebimento.month + 1, day=1)
+        
+        ultimo_dia_mes = (primeiro_dia_mes_seguinte - pd.Timedelta(days=1)).day
+        
+        # Se não for o último dia do mês, aplicar proporção
+        if dia_recebimento < ultimo_dia_mes:
+            proporcao_dias = dia_recebimento / ultimo_dia_mes
+            
+            # Índice do mês anterior (base para cálculo proporcional)
+            indice_mes_anterior = indice_base_extrapolado / (1 + variacao_mensal_ultima)
+            
+            # Calcular variação proporcional
+            variacao_mes_atual = indice_base_extrapolado - indice_mes_anterior
+            variacao_proporcional = variacao_mes_atual * proporcao_dias
+            
+            # Índice final proporcional
+            indice_final = indice_mes_anterior + variacao_proporcional
+        else:
+            # Último dia do mês - usar índice completo
+            indice_final = indice_base_extrapolado
+        
+        return max(indice_final, 1.0)  # Garantir que não seja menor que 1
+    
+    def exemplo_extrapolacao_igpm(self, data_exemplo: str = "2025-03-15") -> dict:
+        """
+        Função de exemplo para demonstrar a extrapolação de índices IGP-M para datas futuras.
+        
+        EXEMPLO PRÁTICO DE EXTRAPOLAÇÃO:
+        - Data de recebimento: 15/03/2025 (além dos dados disponíveis)
+        - Última data IGP-M: 31/12/2024
+        - Última variação: 2.5% (dezembro/2024)
+        - Aplicar variação constante por 3 meses + proporção de dias
+        
+        Parâmetros:
+        - data_exemplo: Data para demonstração de extrapolação (formato: "YYYY-MM-DD")
+        
+        Retorna:
+        - dict: Dicionário com detalhes da extrapolação passo a passo
+        """
+        try:
+            # Simular dados para exemplo
+            data_alvo = pd.to_datetime(data_exemplo)
+            ultima_data_igpm = pd.to_datetime("2024-12-31")
+            ultimo_indice = 150.0
+            penultimo_indice = 146.34
+            variacao_mensal_ultima = (ultimo_indice / penultimo_indice) - 1
+            
+            # PROTEÇÃO: Se variação for negativa, considerar zero
+            if variacao_mensal_ultima < 0:
+                variacao_mensal_ultima = 0.0
+            
+            # Cálculos do exemplo
+            periodo_ultima = pd.Period(ultima_data_igpm, freq='M')
+            periodo_alvo = pd.Period(data_alvo, freq='M')
+            meses_diferenca = periodo_alvo.ordinal - periodo_ultima.ordinal
+            
+            # Extrapolação mês a mês
+            indice_extrapolado = ultimo_indice
+            for i in range(meses_diferenca):
+                indice_extrapolado = indice_extrapolado * (1 + variacao_mensal_ultima)
+            
+            # Cálculo proporcional para o mês final
+            dia_alvo = data_alvo.day
+            if data_alvo.month == 12:
+                primeiro_dia_mes_seguinte = pd.Timestamp(year=data_alvo.year + 1, month=1, day=1)
+            else:
+                primeiro_dia_mes_seguinte = pd.Timestamp(year=data_alvo.year, month=data_alvo.month + 1, day=1)
+            
+            ultimo_dia_mes = (primeiro_dia_mes_seguinte - pd.Timedelta(days=1)).day
+            proporcao_dias = dia_alvo / ultimo_dia_mes
+            
+            # Índice do mês anterior ao alvo
+            indice_mes_anterior = indice_extrapolado / (1 + variacao_mensal_ultima)
+            variacao_mes_atual = indice_extrapolado - indice_mes_anterior
+            variacao_proporcional = variacao_mes_atual * proporcao_dias
+            indice_final = indice_mes_anterior + variacao_proporcional
+            
+            resultado = {
+                'data_exemplo': data_exemplo,
+                'ultima_data_igpm': "2024-12-31",
+                'ultimo_indice': ultimo_indice,
+                'penultimo_indice': penultimo_indice,
+                'variacao_percentual_ultima': f"{variacao_mensal_ultima * 100:.2f}%",
+                'meses_extrapolacao': meses_diferenca,
+                'indice_extrapolado_completo': round(indice_extrapolado, 4),
+                'dia_no_mes': dia_alvo,
+                'total_dias_mes': ultimo_dia_mes,
+                'proporcao_percentual': f"{proporcao_dias * 100:.2f}",
+                'indice_mes_anterior': round(indice_mes_anterior, 4),
+                'variacao_mes_atual': round(variacao_mes_atual, 4),
+                'variacao_proporcional': round(variacao_proporcional, 4),
+                'indice_final_extrapolado': round(indice_final, 4),
+                'explicacao': f"""
+DEMONSTRAÇÃO DE EXTRAPOLAÇÃO IGP-M - VOLTZ
+
+📅 SITUAÇÃO:
+• Data de recebimento: {data_exemplo} (além dos dados disponíveis)
+• Última data IGP-M: 31/12/2024
+• Último índice: {ultimo_indice}
+• Penúltimo índice: {penultimo_indice}
+
+📊 ETAPA 1 - CÁLCULO DA VARIAÇÃO BASE:
+• Variação última competência = ({ultimo_indice} ÷ {penultimo_indice}) - 1
+• Variação = {variacao_mensal_ultima * 100:.2f}% ao mês
+• 🛡️ PROTEÇÃO: Variações negativas são consideradas 0% (sem crescimento)
+
+🚀 ETAPA 2 - EXTRAPOLAÇÃO MENSAL:
+• Meses além da última data: {meses_diferenca}
+• Aplicar variação {variacao_mensal_ultima * 100:.2f}% por {meses_diferenca} meses
+• Índice extrapolado completo = {ultimo_indice} × (1 + {variacao_mensal_ultima:.4f})^{meses_diferenca}
+• Índice extrapolado completo = {indice_extrapolado:.4f}
+
+⚖️ ETAPA 3 - PROPORÇÃO DE DIAS:
+• Data alvo: {dia_alvo}/{data_alvo.month}/{data_alvo.year} (dia {dia_alvo} de {ultimo_dia_mes})
+• Proporção de dias = {dia_alvo} ÷ {ultimo_dia_mes} = {proporcao_dias:.4f} ({proporcao_dias * 100:.2f}%)
+
+🧮 ETAPA 4 - CÁLCULO PROPORCIONAL FINAL:
+• Índice mês anterior = {indice_extrapolado:.4f} ÷ (1 + {variacao_mensal_ultima:.4f}) = {indice_mes_anterior:.4f}
+• Variação do mês atual = {indice_extrapolado:.4f} - {indice_mes_anterior:.4f} = {variacao_mes_atual:.4f}
+• Variação proporcional = {variacao_mes_atual:.4f} × {proporcao_dias:.4f} = {variacao_proporcional:.4f}
+• Índice final = {indice_mes_anterior:.4f} + {variacao_proporcional:.4f} = {indice_final:.4f}
+
+✅ RESULTADO FINAL: {indice_final:.4f}
+
+Esta metodologia garante precisão temporal máxima, aplicando:
+1. Extrapolação baseada na tendência mais recente
+2. Cálculo proporcional para meses parciais
+3. Continuidade matemática com dados históricos
+                """
+            }
+            
+            return resultado
+            
+        except Exception as e:
+            return {
+                'erro': True,
+                'explicacao': f"Erro ao gerar exemplo de extrapolação: {str(e)}"
+            }
+    
     def calcular_valor_justo_voltz(self, df: pd.DataFrame, df_di_pre: pd.DataFrame, 
                                    data_base: datetime = None, 
                                    spread_risco: float = 0.025) -> pd.DataFrame:
-        """
-        Calcula valor justo para VOLTZ usando DI-PRE para desconto a valor presente.
-        
-        Parâmetros:
-        - df: DataFrame com valores corrigidos da VOLTZ
-        - df_di_pre: DataFrame com taxas DI-PRE
-        - data_base: Data base para cálculo (padrão: data atual)
-        - spread_risco: Spread de risco aplicado sobre DI-PRE (padrão: 2.5%)
-        
-        Fórmula:
-        Valor Justo = (Valor Corrigido × Taxa Recuperação) / (1 + Taxa Desconto)^meses_ate_recebimento
-        COM CHECKPOINT: Evita reprocessamento se dados não mudaram.
-        """
-        if data_base is None:
-            data_base = datetime.now()
-        
-        return usar_checkpoint(
-            checkpoint_name="valor_justo_voltz",
-            funcao_processamento=self._calcular_valor_justo_voltz_interno,
-            dataframes={
-                "df_principal": df,
-                "df_di_pre": df_di_pre
-            },
-            parametros={
-                "data_base": data_base.isoformat(),
-                "spread_risco": spread_risco
-            },
-            df=df,
-            df_di_pre=df_di_pre,
-            data_base=data_base,
-            spread_risco=spread_risco
-        )
-    
-    def _calcular_valor_justo_voltz_interno(self, df: pd.DataFrame, df_di_pre: pd.DataFrame, 
-                                           data_base: datetime = None, 
-                                           spread_risco: float = 0.025) -> pd.DataFrame:
-        """
-        Implementação interna do cálculo de valor justo (sem checkpoint)
-        """
+
         df = df.copy()
         
         if data_base is None:
@@ -1054,12 +1985,11 @@ class CalculadorVoltz:
         df = self._aplicar_taxa_di_pre(df, df_di_pre, spread_risco)
         
         # Calcular valor justo
-        valor_corrigido = df['valor_corrigido'].values
-        taxa_recuperacao = df['taxa_recuperacao'].values
+        valor_corrigido = df['valor_corrigido_ate_data_base'].values
         fator_desconto = df['fator_desconto'].values
         
         # Operação vetorizada para cálculo do valor justo
-        df['valor_justo'] = (valor_corrigido * taxa_recuperacao) / fator_desconto
+        df['valor_justo'] = (valor_corrigido) / fator_desconto
         
         # Garantir que não seja negativo
         df['valor_justo'] = np.maximum(df['valor_justo'], 0)
@@ -1068,8 +1998,13 @@ class CalculadorVoltz:
     
     def _calcular_meses_ate_recebimento(self, df: pd.DataFrame, data_base: datetime) -> pd.DataFrame:
         """
-        Calcula meses até recebimento estimado baseado no aging (VOLTZ) ou aging_taxa (Distribuidoras)
+        Calcula meses até recebimento estimado baseado no aging (VOLTZ) ou aging_taxa (Distribuidoras).
+        Se já existe 'meses_ate_recebimento' no DataFrame, usa esse valor.
         """
+        # Se já tem meses_ate_recebimento, não precisa calcular
+        if 'meses_ate_recebimento' in df.columns:
+            return df
+            
         def calcular_meses_fallback(aging_valor):
             aging_valor = str(aging_valor).strip().lower()
             if 'vencer' in aging_valor:
@@ -1106,10 +2041,33 @@ class CalculadorVoltz:
     
     def _aplicar_taxa_di_pre(self, df: pd.DataFrame, df_di_pre: pd.DataFrame, spread_risco: float) -> pd.DataFrame:
         """
-        Aplica taxa DI-PRE + spread de risco para cada linha baseado nos meses até recebimento
+        Aplica taxa DI-PRE + spread de risco para cada linha baseado nos meses até recebimento.
+        
+        Usa dados do session state para acessar df_di_pre com coluna 'meses_futuros' calculada.
         """
+        # Verificar se temos dados DI-PRE no session state
+        if hasattr(st.session_state, 'df_di_pre') and st.session_state.df_di_pre is not None:
+            df_di_pre_session = st.session_state.df_di_pre.copy()
+            
+            # Criar coluna 'meses_futuros' se não existir
+            if 'meses_futuros' not in df_di_pre_session.columns:
+                if 'dias_corridos' in df_di_pre_session.columns:
+                    df_di_pre_session['meses_futuros'] = (df_di_pre_session['dias_corridos'] / 30.44).round().astype(int)
+                    st.info("✅ VOLTZ: Coluna 'meses_futuros' criada a partir de 'dias_corridos'")
+                else:
+                    st.warning("⚠️ VOLTZ: Nem 'meses_futuros' nem 'dias_corridos' encontrados no df_di_pre")
+                    # Usar valores padrão
+                    df_di_pre_session['meses_futuros'] = range(1, len(df_di_pre_session) + 1)
+        else:
+            # Fallback: usar df_di_pre passado como parâmetro
+            df_di_pre_session = df_di_pre.copy()
+            if 'meses_futuros' not in df_di_pre_session.columns:
+                st.warning("⚠️ VOLTZ: df_di_pre não possui coluna 'meses_futuros'. Usando valores padrão.")
+                df_di_pre_session['meses_futuros'] = range(1, len(df_di_pre_session) + 1)
+        
         # Inicializar colunas
         df['taxa_di_pre'] = 0.0
+        df['taxa_di_pre_total_anual'] = 0.0  # Nova coluna para compatibilidade
         df['taxa_desconto_total'] = 0.0
         df['fator_desconto'] = 1.0
         
@@ -1117,12 +2075,26 @@ class CalculadorVoltz:
             meses_recebimento = int(row['meses_ate_recebimento'])
             
             # Buscar taxa DI-PRE correspondente
-            linha_di_pre = df_di_pre[df_di_pre['meses_futuros'] == meses_recebimento]
+            linha_di_pre = df_di_pre_session[df_di_pre_session['meses_futuros'] == meses_recebimento]
             
             if not linha_di_pre.empty:
                 # Taxa encontrada
-                taxa_di_pre_anual = linha_di_pre.iloc[0]['252'] / 100  # Converter para decimal
+                if '252' in linha_di_pre.columns:
+                    taxa_di_pre_anual = linha_di_pre.iloc[0]['252'] / 100  # Converter para decimal
+                elif 'taxa_252' in linha_di_pre.columns:
+                    taxa_di_pre_anual = linha_di_pre.iloc[0]['taxa_252'] / 100
+                elif 'taxa' in linha_di_pre.columns:
+                    taxa_di_pre_anual = linha_di_pre.iloc[0]['taxa'] / 100
+                else:
+                    # Usar primeira coluna numérica disponível
+                    colunas_numericas = linha_di_pre.select_dtypes(include=[np.number]).columns
+                    if len(colunas_numericas) > 0:
+                        taxa_di_pre_anual = linha_di_pre.iloc[0][colunas_numericas[0]] / 100
+                    else:
+                        taxa_di_pre_anual = 0.10  # 10% padrão
+                
                 df.at[idx, 'taxa_di_pre'] = taxa_di_pre_anual
+                df.at[idx, 'taxa_di_pre_total_anual'] = taxa_di_pre_anual
                 
                 # Aplicar spread de risco
                 taxa_desconto_total = (1 + taxa_di_pre_anual) * (1 + spread_risco) - 1
@@ -1133,12 +2105,219 @@ class CalculadorVoltz:
                 fator_desconto = (1 + taxa_desconto_total) ** anos
                 df.at[idx, 'fator_desconto'] = fator_desconto
             else:
-                # Taxa padrão se não encontrar
-                taxa_padrao = 0.10  # 10% a.a.
-                df.at[idx, 'taxa_di_pre'] = taxa_padrao
-                taxa_desconto_total = (1 + taxa_padrao) * (1 + spread_risco) - 1
-                df.at[idx, 'taxa_desconto_total'] = taxa_desconto_total
-                anos = meses_recebimento / 12
-                df.at[idx, 'fator_desconto'] = (1 + taxa_desconto_total) ** anos
+                st.error("⚠️ VOLTZ: Taxa DI-PRE não encontrada para alguns meses.")
+                return None
+        return df
+    
+    def calcular_remuneracao_variavel_voltz(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcula remuneração variável específica para VOLTZ usando o sistema modular
+        e aplica o cálculo de valor justo com taxa de desconto.
+        
+        A VOLTZ utiliza uma estrutura de descontos mais agressiva devido ao perfil
+        de risco diferenciado dos contratos de fintech/CCBs.
+        
+        Fórmula do valor justo:
+        1. Taxa desconto mensal = (1 + taxa_di_pre_total_anual)^(1/12) - 1
+        2. Fator de desconto = (1 + taxa_desconto_mensal)^meses_ate_recebimento
+        3. Valor justo = (remuneracao_variavel_valor_final * taxa_recuperacao) / fator_de_desconto
+        
+        Args:
+            df: DataFrame com dados da VOLTZ incluindo coluna 'aging'
+            
+        Returns:
+            pd.DataFrame: DataFrame com remuneração variável e valor justo calculados
+        """
+        if df.empty:
+            return df
+        
+        # Verificar se temos a coluna necessária para cálculo
+        coluna_valor = 'valor_recuperavel_ate_recebimento'
+        if coluna_valor not in df.columns:
+            # Usar valor alternativo se disponível
+            if 'valor_corrigido_ate_data_base' in df.columns:
+                coluna_valor = 'valor_corrigido_ate_data_base'
+                st.info(f"⚡ VOLTZ: Usando '{coluna_valor}' como base para remuneração variável")
+            else:
+                st.warning("⚠️ VOLTZ: Nenhuma coluna de valor adequada encontrada para remuneração variável")
+                return df
+        
+        # Inicializar calculador específico da VOLTZ
+        calculador_rv = CalculadorRemuneracaoVariavel(distribuidora="VOLTZ")
+        
+        # Calcular remuneração variável com configuração VOLTZ
+        df_resultado = calculador_rv.calcular_remuneracao_variavel(
+            df=df,
+            coluna_valor=coluna_valor,
+            coluna_aging='aging',
+            prefixo_colunas='remuneracao_variavel_voltz'
+        )
+
+        
+        return df_resultado
+    
+    def _calcular_valor_justo_com_desconto_voltz(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcula valor justo usando taxa de desconto DI-PRE para VOLTZ.
+        
+        Implementa a lógica:
+        1. Taxa desconto mensal = (1 + taxa_di_pre_total_anual)^(1/12) - 1
+        2. Fator de desconto = (1 + taxa_desconto_mensal)^meses_ate_recebimento
+        3. Valor justo = (remuneracao_variavel_valor_final * taxa_recuperacao) / fator_de_desconto
+        
+        Args:
+            df: DataFrame com remuneração variável calculada
+            
+        Returns:
+            pd.DataFrame: DataFrame com valor justo calculado
+        """
+        df = df.copy()
+        
+        # Verificar se temos as colunas necessárias
+        colunas_necessarias = ['remuneracao_variavel_voltz_valor_final', 'taxa_recuperacao', 'meses_ate_recebimento']
+        
+        for coluna in colunas_necessarias:
+            if coluna not in df.columns:
+                st.warning(f"⚠️ VOLTZ: Coluna '{coluna}' não encontrada para cálculo do valor justo")
+                return df
+        
+        # Verificar se temos taxa DI-PRE total anual
+        if 'taxa_di_pre_total_anual' not in df.columns:
+            # Usar taxa padrão se não estiver disponível
+            st.warning("⚠️ VOLTZ: Taxa DI-PRE não encontrada, usando taxa padrão de 10% a.a.")
+            df['taxa_di_pre_total_anual'] = 0.10  # 10% a.a. como padrão
+        
+        # 1. CALCULAR TAXA DE DESCONTO MENSAL (vetorizado)
+        # Fórmula: (1 + taxa_anual)^(1/12) - 1
+        df['taxa_desconto_mensal'] = ((1 + df['taxa_di_pre_total_anual']) * ( 1 + 0.025) ) ** (1/12) - 1
+        
+        # 2. CALCULAR FATOR DE DESCONTO (vetorizado)
+        # Fórmula: (1 + taxa_mensal)^meses
+        df['fator_de_desconto'] = (1 + df['taxa_desconto_mensal']) ** df['meses_ate_recebimento']
+        
+        # 4. CALCULAR VALOR JUSTO FINAL (vetorizado)
+        # Fórmula: (valor_final * taxa_recuperacao) / fator_desconto
+        # Proteção contra divisão por zero
+        mask_valido = df['fator_de_desconto'] > 0
+        df['valor_justo'] = np.where(
+            mask_valido,
+            df['remuneracao_variavel_voltz_valor_final'] * df['taxa_recuperacao'] / df['fator_de_desconto'],
+            0.0
+        )
+        
+        # Garantir que não seja negativo
+        df['valor_justo'] = np.maximum(df['valor_justo'], 0)
+        
+        return df
+    
+    def _exibir_resumo_valor_justo_voltz(self, df: pd.DataFrame):
+        """
+        Exibe resumo customizado do cálculo de valor justo para VOLTZ.
+        
+        Args:
+            df: DataFrame com valor justo calculado
+        """
+        if df.empty:
+            return
+        
+        st.success("⚡ **VOLTZ**: Remuneração variável e valor justo calculados!")
+        
+        # Métricas principais
+        col1, col2, col3, col4 = st.columns(4)
+        
+        # Valores base
+        total_corrigido = df['valor_corrigido_ate_recebimento'].sum() if 'valor_corrigido_ate_recebimento' in df.columns else 0
+        total_apos_rv = df['remuneracao_variavel_voltz_valor_final'].sum() if 'remuneracao_variavel_voltz_valor_final' in df.columns else 0
+        total_com_recuperacao = df['valor_com_recuperacao'].sum() if 'valor_com_recuperacao' in df.columns else 0
+        total_valor_justo = df['valor_justo'].sum() if 'valor_justo' in df.columns else 0
+        
+        with col1:
+            st.metric(
+                "Valor Corrigido", 
+                f"R$ {total_corrigido:,.2f}",
+                help="Valor corrigido até recebimento (base do cálculo)"
+            )
+        
+        with col2:
+            desconto_rv = total_corrigido - total_apos_rv if total_corrigido > 0 else 0
+            perc_rv = (desconto_rv / total_corrigido * 100) if total_corrigido > 0 else 0
+            st.metric(
+                "Após Rem. Variável", 
+                f"R$ {total_apos_rv:,.2f}",
+                f"-{perc_rv:.1f}%",
+                help="Valor após aplicação da remuneração variável"
+            )
+        
+        with col3:
+            if total_com_recuperacao != total_apos_rv:
+                efeito_recuperacao = total_com_recuperacao - total_apos_rv
+                perc_recuperacao = (efeito_recuperacao / total_apos_rv * 100) if total_apos_rv > 0 else 0
+                delta_text = f"{perc_recuperacao:+.1f}%"
+            else:
+                delta_text = None
+            
+            st.metric(
+                "Com Taxa Recuperação", 
+                f"R$ {total_com_recuperacao:,.2f}",
+                delta_text,
+                help="Valor após aplicação da taxa de recuperação"
+            )
+        
+        with col4:
+            desconto_vp = total_com_recuperacao - total_valor_justo
+            perc_vp = (desconto_vp / total_com_recuperacao * 100) if total_com_recuperacao > 0 else 0
+            st.metric(
+                "Valor Justo Final", 
+                f"R$ {total_valor_justo:,.2f}",
+                f"-{perc_vp:.1f}%",
+                help="Valor justo final (descontado a valor presente)"
+            )
+        
+        # Análise detalhada por aging se disponível
+        if 'aging' in df.columns and len(df) > 1:
+            with st.expander("📊 Análise por Faixa de Aging"):
+                resumo_aging = df.groupby('aging').agg({
+                    'valor_corrigido_ate_recebimento': 'sum',
+                    'remuneracao_variavel_voltz_valor_final': 'sum',
+                    'valor_justo': 'sum',
+                    'taxa_desconto_mensal': 'mean',
+                    'meses_ate_recebimento': 'mean',
+                    'fator_de_desconto': 'mean'
+                }).round(2)
+                
+                resumo_aging.columns = [
+                    'Valor Corrigido',
+                    'Após Rem. Variável', 
+                    'Valor Justo',
+                    'Taxa Desc. Mensal (%)',
+                    'Meses Recebimento',
+                    'Fator Desconto'
+                ]
+                
+                # Converter taxa para percentual
+                resumo_aging['Taxa Desc. Mensal (%)'] = resumo_aging['Taxa Desc. Mensal (%)'] * 100
+                
+                st.dataframe(resumo_aging, use_container_width=True)
+        
+        # Informações sobre a metodologia
+        st.info("""
+        **🔍 Metodologia do Valor Justo VOLTZ:**
+        
+        **1. Remuneração Variável:**
+        - Desconto baseado no aging (configuração agressiva para fintech)
+        - Aplicado sobre valor corrigido até recebimento
+        
+        **2. Taxa de Recuperação:**
+        - Baseada no perfil de risco da empresa e aging
+        - Reflete probabilidade de recuperação do crédito
+        
+        **3. Desconto a Valor Presente:**
+        - Taxa DI-PRE convertida para mensal: `(1 + taxa_anual)^(1/12) - 1`
+        - Fator de desconto: `(1 + taxa_mensal)^meses`
+        - Valor justo: `(valor_final × taxa_recuperação) ÷ fator_desconto`
+        
+        **🎯 Resultado:** Valor justo representa o valor presente líquido dos recebíveis,
+        considerando risco de inadimplência e valor do dinheiro no tempo.
+        """)
         
         return df
