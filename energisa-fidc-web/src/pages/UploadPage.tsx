@@ -1,15 +1,12 @@
 /**
  * Page 1: Upload (Carregamento)
  *
- * Flow per file:
- *  1. User drops / selects Excel files
- *  2. File is parsed locally (SheetJS) for instant preview
- *  3. File is uploaded to Supabase Storage  temp/bases/<sessionId>/<file>
- *  4. Edge Function `validate-excel` checks if row 1 is a header
- *     → If invalid: file is rejected with an error message
- *  5. Edge Function `extract-columns` returns detailed column metadata
- *     (type detection, sample values, uniqueness)
- *  6. Results feed into field-mapper on the next step
+ * Progressive pipeline per file:
+ *  1. Parse locally with SheetJS  → file appears in list immediately
+ *  2. Upload to Supabase Storage   → Storage badge updates
+ *  3. Edge Function `read-columns` → validates header + extracts column metadata
+ *     - If invalid: file marked as rejected (can still be removed)
+ *     - If valid:   columns / rowCount / columnInfo updated from server
  */
 import { useCallback, useState } from "react";
 import { useApp } from "@/context/AppContext";
@@ -37,6 +34,7 @@ import {
   ShieldCheck,
   ShieldX,
   Columns3,
+  CheckCircle2,
 } from "lucide-react";
 import { formatNumber } from "@/lib/utils";
 import type { UploadedFile } from "@/types";
@@ -44,126 +42,146 @@ import type { UploadedFile } from "@/types";
 export function UploadPage() {
   const { uploadedFiles, setUploadedFiles, setCurrentStep } = useApp();
   const [isDragging, setIsDragging] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const supabaseReady = isSupabaseConfigured();
 
-  /**
-   * Full pipeline per file:
-   *  upload → validate-excel → extract-columns → update state
-   */
-  const processFile = async (
-    file: File,
-    parsed: UploadedFile
-  ): Promise<UploadedFile> => {
-    let result: UploadedFile = {
-      ...parsed,
-      uploadStatus: "pending",
-      validationStatus: "pending",
-    };
-
-    if (!supabaseReady) return result;
-
-    // ── Step 1: Upload to Storage ──
-    try {
-      result = { ...result, uploadStatus: "uploading" };
-      const storageResult = await uploadFileToStorage(file, "bases");
-      result = {
-        ...result,
-        storagePath: storageResult.path,
-        uploadStatus: "uploaded",
-      };
-    } catch {
-      return { ...result, uploadStatus: "error" };
-    }
-
-    // ── Step 2: Read columns (single edge function: validate + extract) ──
-    try {
-      result = { ...result, validationStatus: "validating" };
-      const r = await callReadColumns(result.storagePath!, file.name);
-
-      if (!r.valid) {
-        // Invalid header or parse error → reject, remove from Storage
-        await deleteFileFromStorage(result.storagePath!).catch(() => {});
-        return {
-          ...result,
-          validationStatus: "invalid",
-          validationError:
-            r.error ?? "Cabeçalho inválido — a primeira linha não contém nomes de colunas válidos.",
-          uploadStatus: "error",
-        };
-      }
-
-      // Success — use server-side data (authoritative)
-      result = {
-        ...result,
-        validationStatus: "valid",
-        columns: r.columns ?? result.columns,
-        columnInfo: r.columnInfo,
-        rowCount: r.rowCount ?? result.rowCount,
-        sheetName: r.sheetName,
-        isVoltz: r.isVoltz || result.isVoltz,
-      };
-    } catch (e) {
-      // Edge function unreachable → keep local parse data, allow proceeding
-      console.warn("read-columns edge function failed:", e);
-      result = { ...result, validationStatus: "error" };
-    }
-
-    return result;
-  };
-
   const handleFiles = useCallback(
     async (fileList: FileList | File[]) => {
-      setIsLoading(true);
+      setIsProcessing(true);
       setError(null);
+
       const files = Array.from(fileList).filter(
         (f) => f.name.endsWith(".xlsx") || f.name.endsWith(".xls")
       );
 
       if (files.length === 0) {
         setError("Nenhum arquivo Excel válido (.xlsx, .xls) selecionado.");
-        setIsLoading(false);
+        setIsProcessing(false);
         return;
       }
 
+      // ── Step 1: Parse locally → show immediately ─────────────────
+      let parsed: UploadedFile[];
       try {
-        // Parse locally first (instant feedback)
-        const parsed = await Promise.all(files.map(parseExcelFile));
-
-        // Run full pipeline in parallel per file
-        const processed = await Promise.all(
-          parsed.map((p, i) => processFile(files[i], p))
-        );
-
-        // Separate valid and rejected
-        const valid = processed.filter(
-          (f) => f.validationStatus !== "invalid"
-        );
-        const rejected = processed.filter(
-          (f) => f.validationStatus === "invalid"
-        );
-
-        if (rejected.length > 0) {
-          const msgs = rejected
-            .map((f) => `• ${f.name}: ${f.validationError}`)
-            .join("\n");
-          setError(
-            `${rejected.length} arquivo(s) rejeitado(s):\n${msgs}`
-          );
-        }
-
-        if (valid.length > 0) {
-          setUploadedFiles([...uploadedFiles, ...valid]);
-        }
+        parsed = await Promise.all(files.map(parseExcelFile));
       } catch (err) {
         setError(String(err));
-      } finally {
-        setIsLoading(false);
+        setIsProcessing(false);
+        return;
+      }
+
+      // Add all parsed files to state right away so the user sees data
+      const withInit: UploadedFile[] = parsed.map((p) => ({
+        ...p,
+        uploadStatus: supabaseReady ? "pending" : undefined,
+        validationStatus: supabaseReady ? "pending" : undefined,
+      }));
+
+      setUploadedFiles((prev) => [...prev, ...withInit]);
+      setIsProcessing(false); // local parse done — spinner off
+
+      if (!supabaseReady) return; // no Supabase → stop here
+
+      // ── Step 2 + 3: Upload → edge function (per file, parallel) ──
+      for (const [i, parsed_item] of withInit.entries()) {
+        const file = files[i];
+        const id = parsed_item.id;
+
+        // Run the async pipeline without blocking the loop
+        (async () => {
+          // 2a. Upload to Storage
+          setUploadedFiles((prev) =>
+            prev.map((f) =>
+              f.id === id ? { ...f, uploadStatus: "uploading" } : f
+            )
+          );
+
+          let storagePath: string;
+          try {
+            const storageResult = await uploadFileToStorage(file, "bases");
+            storagePath = storageResult.path;
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id
+                  ? { ...f, storagePath, uploadStatus: "uploaded" }
+                  : f
+              )
+            );
+          } catch (uploadErr) {
+            console.error("[upload] failed:", uploadErr);
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id ? { ...f, uploadStatus: "error" } : f
+              )
+            );
+            return; // skip edge function if upload failed
+          }
+
+          // 2b. Edge function: validate + extract columns
+          setUploadedFiles((prev) =>
+            prev.map((f) =>
+              f.id === id ? { ...f, validationStatus: "validating" } : f
+            )
+          );
+
+          try {
+            const r = await callReadColumns(storagePath, file.name);
+
+            if (!r.valid) {
+              console.warn("[read-columns] invalid:", r.error);
+              // Remove from Storage (best-effort)
+              deleteFileFromStorage(storagePath).catch(() => {});
+              setUploadedFiles((prev) =>
+                prev.map((f) =>
+                  f.id === id
+                    ? {
+                        ...f,
+                        validationStatus: "invalid",
+                        validationError:
+                          r.error ??
+                          "Cabeçalho inválido — a primeira linha não contém nomes de colunas.",
+                        uploadStatus: "error",
+                      }
+                    : f
+                )
+              );
+              return;
+            }
+
+            // Valid → update with server-side data (authoritative)
+            console.info(
+              `[read-columns] ok: ${r.columns?.length} cols, ${r.rowCount} rows`
+            );
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id
+                  ? {
+                      ...f,
+                      validationStatus: "valid",
+                      columns: r.columns ?? f.columns,
+                      columnInfo: r.columnInfo,
+                      rowCount: r.rowCount ?? f.rowCount,
+                      sheetName: r.sheetName,
+                      isVoltz: r.isVoltz || f.isVoltz,
+                    }
+                  : f
+              )
+            );
+          } catch (efErr) {
+            console.warn("[read-columns] edge function unreachable:", efErr);
+            // Keep local data, mark validation as error (not invalid)
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id ? { ...f, validationStatus: "error" } : f
+              )
+            );
+          }
+        })();
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [uploadedFiles, setUploadedFiles, supabaseReady]
+    [supabaseReady]
   );
 
   const handleDrop = useCallback(
@@ -180,17 +198,33 @@ export function UploadPage() {
     if (file?.storagePath) {
       deleteFileFromStorage(file.storagePath).catch(() => {});
     }
-    setUploadedFiles(uploadedFiles.filter((f) => f.id !== id));
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
   const proceed = () => {
     if (uploadedFiles.length > 0) setCurrentStep(1);
   };
 
-  // Only allow proceeding when all files passed validation (or Supabase isn't configured)
-  const allValidated = uploadedFiles.every(
-    (f) => f.validationStatus === "valid" || !supabaseReady
+  // Allow proceeding if all files are valid (or Supabase not configured, or validation errored but not rejected)
+  const allReady = uploadedFiles.every(
+    (f) =>
+      !supabaseReady ||
+      f.validationStatus === "valid" ||
+      f.validationStatus === "error" // edge fn down → allow with local data
   );
+  const anyPending = uploadedFiles.some(
+    (f) =>
+      supabaseReady &&
+      (f.uploadStatus === "uploading" ||
+        f.validationStatus === "validating" ||
+        f.validationStatus === "pending")
+  );
+
+  const canProceed =
+    uploadedFiles.length > 0 &&
+    allReady &&
+    !anyPending &&
+    uploadedFiles.some((f) => f.validationStatus !== "invalid");
 
   return (
     <motion.div
@@ -205,47 +239,35 @@ export function UploadPage() {
           Carregamento de Dados
         </h2>
         <p className="text-muted-foreground mt-1">
-          Faça upload dos arquivos Excel das distribuidoras para iniciar o
-          processamento.
+          Faça upload dos arquivos Excel das distribuidoras para iniciar o processamento.
         </p>
       </div>
 
       {/* ── Drop Zone ── */}
       <Card className="overflow-hidden">
         <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
           onDragLeave={() => setIsDragging(false)}
           onDrop={handleDrop}
           className={`
             relative flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-xl
             transition-all duration-300 cursor-pointer
-            ${
-              isDragging
-                ? "border-primary bg-blue-50/50 scale-[1.01]"
-                : "border-slate-200 hover:border-blue-300 hover:bg-slate-50/50"
-            }
+            ${isDragging
+              ? "border-primary bg-blue-50/50 scale-[1.01]"
+              : "border-slate-200 hover:border-blue-300 hover:bg-slate-50/50"}
           `}
         >
           <div
             className={`
               flex items-center justify-center w-16 h-16 rounded-2xl mb-4 transition-all duration-300
-              ${
-                isDragging
-                  ? "bg-primary text-white scale-110"
-                  : "bg-slate-100 text-slate-400"
-              }
+              ${isDragging ? "bg-primary text-white scale-110" : "bg-slate-100 text-slate-400"}
             `}
           >
             <Upload className="w-7 h-7" />
           </div>
 
           <p className="text-base font-medium text-foreground mb-1">
-            {isDragging
-              ? "Solte os arquivos aqui"
-              : "Arraste e solte seus arquivos Excel"}
+            {isDragging ? "Solte os arquivos aqui" : "Arraste e solte seus arquivos Excel"}
           </p>
           <p className="text-sm text-muted-foreground mb-4">
             Formatos aceitos: .xlsx, .xls
@@ -264,7 +286,7 @@ export function UploadPage() {
             </Button>
           </label>
 
-          {isLoading && (
+          {isProcessing && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -272,9 +294,7 @@ export function UploadPage() {
             >
               <div className="flex flex-col items-center gap-3">
                 <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                <span className="text-sm font-medium text-primary">
-                  Enviando e validando…
-                </span>
+                <span className="text-sm font-medium text-primary">Lendo arquivo…</span>
               </div>
             </motion.div>
           )}
@@ -304,108 +324,101 @@ export function UploadPage() {
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, x: -20 }}
-            transition={{ delay: idx * 0.05 }}
+            transition={{ delay: idx * 0.04 }}
           >
-            <Card>
+            <Card className={file.validationStatus === "invalid" ? "border-red-200 bg-red-50/30" : ""}>
               <CardContent className="flex items-center gap-4 p-4">
-                <div className="flex items-center justify-center w-11 h-11 rounded-xl bg-emerald-50 text-emerald-600">
+                <div className={`flex items-center justify-center w-11 h-11 rounded-xl
+                  ${file.validationStatus === "invalid"
+                    ? "bg-red-100 text-red-500"
+                    : "bg-emerald-50 text-emerald-600"}`}
+                >
                   <FileSpreadsheet className="w-5 h-5" />
                 </div>
 
                 <div className="flex-1 min-w-0">
-                  {/* ── Badges Row ── */}
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm font-medium truncate">
-                      {file.name}
-                    </p>
+                  {/* Badges */}
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <p className="text-sm font-medium truncate">{file.name}</p>
 
                     {file.isVoltz && (
                       <Badge variant="warning" className="gap-1">
-                        <Zap className="w-3 h-3" />
-                        VOLTZ
+                        <Zap className="w-3 h-3" />VOLTZ
                       </Badge>
                     )}
 
-                    {/* Storage badge */}
-                    {file.uploadStatus === "uploaded" && (
-                      <Badge
-                        variant="default"
-                        className="gap-1 bg-sky-100 text-sky-700 border-sky-200"
-                      >
-                        <Cloud className="w-3 h-3" />
-                        Storage
+                    {/* Local parse done (no Supabase) */}
+                    {!supabaseReady && (
+                      <Badge variant="default" className="gap-1 bg-slate-100 text-slate-600 border-slate-200">
+                        <CheckCircle2 className="w-3 h-3" />Local
                       </Badge>
                     )}
+
+                    {/* Storage badges */}
                     {file.uploadStatus === "uploading" && (
-                      <Badge
-                        variant="default"
-                        className="gap-1 bg-amber-50 text-amber-600 border-amber-200"
-                      >
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Enviando…
+                      <Badge variant="default" className="gap-1 bg-amber-50 text-amber-600 border-amber-200">
+                        <Loader2 className="w-3 h-3 animate-spin" />Enviando…
                       </Badge>
                     )}
-                    {file.uploadStatus === "error" &&
-                      file.validationStatus !== "invalid" && (
-                        <Badge variant="destructive" className="gap-1">
-                          <CloudOff className="w-3 h-3" />
-                          Erro Storage
-                        </Badge>
-                      )}
+                    {file.uploadStatus === "uploaded" && (
+                      <Badge variant="default" className="gap-1 bg-sky-100 text-sky-700 border-sky-200">
+                        <Cloud className="w-3 h-3" />Storage
+                      </Badge>
+                    )}
+                    {file.uploadStatus === "error" && file.validationStatus !== "invalid" && (
+                      <Badge variant="destructive" className="gap-1">
+                        <CloudOff className="w-3 h-3" />Erro upload
+                      </Badge>
+                    )}
 
-                    {/* Validation badge */}
-                    {file.validationStatus === "valid" && (
-                      <Badge
-                        variant="default"
-                        className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200"
-                      >
-                        <ShieldCheck className="w-3 h-3" />
-                        Validado
+                    {/* Validation badges */}
+                    {file.validationStatus === "pending" && file.uploadStatus === "uploaded" && (
+                      <Badge variant="default" className="gap-1 bg-slate-100 text-slate-500 border-slate-200">
+                        <Loader2 className="w-3 h-3 animate-spin" />Aguardando…
                       </Badge>
                     )}
                     {file.validationStatus === "validating" && (
-                      <Badge
-                        variant="default"
-                        className="gap-1 bg-amber-50 text-amber-600 border-amber-200"
-                      >
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Validando…
+                      <Badge variant="default" className="gap-1 bg-amber-50 text-amber-600 border-amber-200">
+                        <Loader2 className="w-3 h-3 animate-spin" />Validando…
+                      </Badge>
+                    )}
+                    {file.validationStatus === "valid" && (
+                      <Badge variant="default" className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200">
+                        <ShieldCheck className="w-3 h-3" />Validado
                       </Badge>
                     )}
                     {file.validationStatus === "invalid" && (
                       <Badge variant="destructive" className="gap-1">
-                        <ShieldX className="w-3 h-3" />
-                        Rejeitado
+                        <ShieldX className="w-3 h-3" />Rejeitado
+                      </Badge>
+                    )}
+                    {file.validationStatus === "error" && (
+                      <Badge variant="default" className="gap-1 bg-amber-50 text-amber-700 border-amber-200">
+                        <AlertCircle className="w-3 h-3" />Sem validação
                       </Badge>
                     )}
 
-                    {/* Column extraction badge */}
+                    {/* Column info badge */}
                     {file.columnInfo && file.columnInfo.length > 0 && (
-                      <Badge
-                        variant="default"
-                        className="gap-1 bg-violet-50 text-violet-700 border-violet-200"
-                      >
-                        <Columns3 className="w-3 h-3" />
-                        {file.columnInfo.length} colunas analisadas
+                      <Badge variant="default" className="gap-1 bg-violet-50 text-violet-700 border-violet-200">
+                        <Columns3 className="w-3 h-3" />{file.columnInfo.length} colunas
                       </Badge>
                     )}
                   </div>
 
-                  {/* ── Stats Row ── */}
-                  <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground">
-                    <span>{formatNumber(file.rowCount, 0)} registros</span>
+                  {/* Stats */}
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                    <span className={file.rowCount === 0 ? "text-orange-500 font-medium" : ""}>
+                      {formatNumber(file.rowCount, 0)} registros
+                    </span>
                     <span>{file.columns.length} colunas</span>
                     {file.sheetName && <span>Aba: {file.sheetName}</span>}
-                    {file.detectedDate && (
-                      <span>Data: {file.detectedDate}</span>
-                    )}
+                    {file.detectedDate && <span>Data: {file.detectedDate}</span>}
                   </div>
 
-                  {/* ── Validation Error ── */}
+                  {/* Validation error */}
                   {file.validationError && (
-                    <p className="mt-1 text-xs text-red-600">
-                      {file.validationError}
-                    </p>
+                    <p className="mt-1 text-xs text-red-600">{file.validationError}</p>
                   )}
                 </div>
 
@@ -413,7 +426,7 @@ export function UploadPage() {
                   variant="ghost"
                   size="icon"
                   onClick={() => removeFile(file.id)}
-                  className="text-slate-400 hover:text-red-500"
+                  className="text-slate-400 hover:text-red-500 shrink-0"
                 >
                   <Trash2 className="w-4 h-4" />
                 </Button>
@@ -430,44 +443,36 @@ export function UploadPage() {
           animate={{ opacity: 1 }}
           className="flex items-center justify-between pt-4"
         >
-          <div className="flex items-center gap-4">
-            <p className="text-sm text-muted-foreground">
-              {uploadedFiles.length} arquivo(s) carregado(s) —{" "}
-              {formatNumber(
-                uploadedFiles.reduce((acc, f) => acc + f.rowCount, 0),
-                0
-              )}{" "}
-              registros totais
-            </p>
+          <div className="flex items-center gap-4 text-xs flex-wrap">
+            <span className="text-sm text-muted-foreground">
+              {uploadedFiles.length} arquivo(s) —{" "}
+              {formatNumber(uploadedFiles.reduce((a, f) => a + f.rowCount, 0), 0)} registros
+            </span>
             {supabaseReady && (
-              <div className="flex items-center gap-1.5 text-xs text-sky-600">
+              <span className="flex items-center gap-1 text-sky-600">
                 <Cloud className="w-3.5 h-3.5" />
-                {
-                  uploadedFiles.filter((f) => f.uploadStatus === "uploaded")
-                    .length
-                }
-                /{uploadedFiles.length} no Storage
-              </div>
+                {uploadedFiles.filter((f) => f.uploadStatus === "uploaded").length}/{uploadedFiles.length} no Storage
+              </span>
             )}
             {supabaseReady && (
-              <div className="flex items-center gap-1.5 text-xs text-emerald-600">
+              <span className="flex items-center gap-1 text-emerald-600">
                 <ShieldCheck className="w-3.5 h-3.5" />
-                {
-                  uploadedFiles.filter(
-                    (f) => f.validationStatus === "valid"
-                  ).length
-                }
-                /{uploadedFiles.length} validados
-              </div>
+                {uploadedFiles.filter((f) => f.validationStatus === "valid").length}/{uploadedFiles.length} validados
+              </span>
+            )}
+            {anyPending && (
+              <span className="flex items-center gap-1 text-amber-600">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />processando…
+              </span>
             )}
           </div>
-          <Button
-            onClick={proceed}
-            className="gap-2"
-            disabled={!allValidated}
-          >
-            Próximo: Mapeamento
-            <ArrowRight className="w-4 h-4" />
+
+          <Button onClick={proceed} className="gap-2" disabled={!canProceed}>
+            {anyPending ? (
+              <><Loader2 className="w-4 h-4 animate-spin" />Aguardar…</>
+            ) : (
+              <>Próximo: Mapeamento<ArrowRight className="w-4 h-4" /></>
+            )}
           </Button>
         </motion.div>
       )}

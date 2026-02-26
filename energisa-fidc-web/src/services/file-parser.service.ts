@@ -5,6 +5,38 @@
 import * as XLSX from "xlsx";
 import type { RawRecord, UploadedFile } from "@/types";
 
+/**
+ * Scan the first `limit` rows and return the index of the row that looks
+ * most like a header: most non-empty cells that are text (not numbers /
+ * pure dates). Falls back to 0 if nothing is found.
+ */
+function findHeaderRowIndex(rawRows: unknown[][], limit = 10): number {
+  let bestIdx = 0;
+  let bestScore = -1;
+
+  for (let i = 0; i < Math.min(rawRows.length, limit); i++) {
+    const row = rawRows[i] as unknown[];
+    let textCount = 0;
+    let nonEmpty = 0;
+    for (const cell of row) {
+      const s = String(cell ?? "").trim();
+      if (!s) continue;
+      nonEmpty++;
+      // skip pure numbers and date-like strings
+      if (!isNaN(Number(s)) && s.length < 15) continue;
+      if (/^\d{1,4}[\/\-.\s]\d{1,2}[\/\-.\s]\d{2,4}$/.test(s)) continue;
+      textCount++;
+    }
+    if (nonEmpty === 0) continue;
+    const score = nonEmpty + textCount * 2; // favour rows dense with text labels
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
 export async function parseExcelFile(file: File): Promise<UploadedFile> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -12,32 +44,84 @@ export async function parseExcelFile(file: File): Promise<UploadedFile> {
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: "array", cellDates: true });
+        const workbook = XLSX.read(data, { type: "array", cellDates: false, raw: false });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
+
+        // --- Step 1: get raw rows to find the real header row ---
+        const rawRows = XLSX.utils.sheet_to_json(worksheet, {
+          header: 1,
+          raw: false,
+          defval: "",
+          blankrows: false,
+        }) as unknown[][];
+
+        if (rawRows.length === 0) {
+          return resolve({
+            id: crypto.randomUUID(),
+            name: file.name,
+            data: [],
+            columns: [],
+            rowCount: 0,
+            isVoltz: false,
+          });
+        }
+
+        const headerRowIdx = findHeaderRowIndex(rawRows);
+        const headerRow = rawRows[headerRowIdx] as unknown[];
+
+        // Build column names from that row
+        const columns: string[] = headerRow
+          .map((c) => String(c ?? "").trim())
+          .filter((c) => c.length > 0);
+
+        // --- Step 2: parse keyed JSON using the correct header row ---
+        // sheet_to_json with range starting at headerRowIdx uses that row as keys
+        const ref = worksheet["!ref"];
+        if (!ref) {
+          return resolve({
+            id: crypto.randomUUID(),
+            name: file.name,
+            data: [],
+            columns,
+            rowCount: 0,
+            isVoltz: false,
+          });
+        }
+
+        // restrict parse range to start from headerRowIdx (0-based → 1-based for XLSX range)
+        const range = XLSX.utils.decode_range(ref);
+        range.s.r = headerRowIdx; // start from the header row
         const jsonData: RawRecord[] = XLSX.utils.sheet_to_json(worksheet, {
           raw: false,
           defval: "",
+          range,
         });
 
-        const columns =
-          jsonData.length > 0 ? Object.keys(jsonData[0]) : [];
         const isVoltz =
           file.name.toLowerCase().includes("voltz") ||
           file.name.toLowerCase().includes("volt");
 
-        // Try to detect date from filename or first row
+        // Detect date from filename (YYYYMMDD or DD.MM pattern)
         let detectedDate: string | undefined;
-        const dateMatch = file.name.match(/(\d{4})(\d{2})(\d{2})/);
-        if (dateMatch) {
-          detectedDate = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+        const m1 = file.name.match(/(\d{4})(\d{2})(\d{2})/);
+        const m2 = file.name.match(/(\d{2})\.(\d{2})(?:\.(\d{4}))?/);
+        if (m1) {
+          detectedDate = `${m1[1]}-${m1[2]}-${m1[3]}`;
+        } else if (m2) {
+          const year = m2[3] ?? new Date().getFullYear().toString();
+          detectedDate = `${year}-${m2[2]}-${m2[1]}`;
         }
+
+        console.info(
+          `[parseExcelFile] ${file.name}: headerRow=${headerRowIdx}, cols=${columns.length}, rows=${jsonData.length}`
+        );
 
         resolve({
           id: crypto.randomUUID(),
           name: file.name,
           data: jsonData,
-          columns,
+          columns: jsonData.length > 0 ? Object.keys(jsonData[0]) : columns,
           rowCount: jsonData.length,
           detectedDate,
           isVoltz,

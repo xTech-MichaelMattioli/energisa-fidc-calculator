@@ -8,7 +8,7 @@ import type {
   DIPRERate,
   ProcessingProgress,
 } from "@/types";
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode, type Dispatch, type SetStateAction } from "react";
 
 interface AppState {
   // Step tracking
@@ -17,7 +17,7 @@ interface AppState {
 
   // Step 1: Upload
   uploadedFiles: UploadedFile[];
-  setUploadedFiles: (files: UploadedFile[]) => void;
+  setUploadedFiles: Dispatch<SetStateAction<UploadedFile[]>>;
 
   // Step 2: Mapping
   fieldMappings: Record<string, FieldMapping>;
