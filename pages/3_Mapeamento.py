@@ -7,6 +7,31 @@ import streamlit as st
 import pandas as pd
 from utils.mapeador_campos import MapeadorCampos
 
+def detectar_voltz(arquivos_processados, mapeador):
+    """
+    Função unificada para detectar se algum arquivo é VOLTZ
+    """
+    for nome_arquivo in arquivos_processados.keys():
+        if hasattr(mapeador, 'identificar_tipo_distribuidora'):
+            if mapeador.identificar_tipo_distribuidora(nome_arquivo) == "VOLTZ":
+                return True
+        # Fallback - verificar pelo nome
+        if 'VOLTZ' in nome_arquivo.upper():
+            return True
+    return False
+
+def obter_campos_obrigatorios_voltz():
+    """
+    Retorna lista de campos obrigatórios para VOLTZ
+    """
+    return ['empresa', 'nome_cliente', 'contrato', 'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip', 'data_vencimento']
+
+def obter_campos_obrigatorios_padrao():
+    """
+    Retorna lista de campos obrigatórios para distribuidoras padrão
+    """
+    return ['empresa', 'tipo', 'status', 'situacao', 'nome_cliente', 'classe', 'contrato', 'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip', 'data_vencimento']
+
 def show():
     """Página de Mapeamento de Campos"""
     st.header("🗺️ MAPEAMENTO DE CAMPOS")
@@ -172,14 +197,8 @@ def show():
                     # ========== VERIFICAÇÃO DE DUPLICATAS ESPECÍFICA PARA VOLTZ ==========
                     st.info("🔍 Verificando duplicatas...")
                     
-                    # Detectar se é VOLTZ
-                    eh_voltz = False
-                    if nome_arquivo_unico:
-                        # Um único arquivo - verificar se é VOLTZ
-                        eh_voltz = 'VOLTZ' in nome_arquivo_unico.upper()
-                    else:
-                        # Múltiplos arquivos - verificar se algum é VOLTZ
-                        eh_voltz = any('VOLTZ' in nome.upper() for nome in dataframes_padronizados.keys())
+                    # Usar função unificada para detectar VOLTZ
+                    eh_voltz = detectar_voltz(dataframes_padronizados, mapeador)
                     
                     registros_antes = len(df_final_padronizado)
                     
@@ -313,8 +332,16 @@ def show():
                     with col2:
                         st.metric("📁 Arquivos Processados", len(dataframes_padronizados))
                     with col3:
-                        # Verificar campos essenciais no resultado final
-                        campos_obrigatorios = ['empresa', 'tipo', 'status', 'situacao', 'nome_cliente', 'classe', 'contrato', 'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip', 'data_vencimento']
+                        # Verificar campos essenciais no resultado final usando função unificada
+                        eh_voltz_metricas = detectar_voltz(arquivos_processados, mapeador)
+                        
+                        if eh_voltz_metricas:
+                            # Campos obrigatórios para VOLTZ
+                            campos_obrigatorios = obter_campos_obrigatorios_voltz()
+                        else:
+                            # Campos obrigatórios para outras distribuidoras
+                            campos_obrigatorios = obter_campos_obrigatorios_padrao()
+                        
                         campos_ok = sum(1 for campo in campos_obrigatorios if campo in df_final_padronizado.columns)
                         st.metric("✅ Campos Obrigatórios", f"{campos_ok}/{len(campos_obrigatorios)}")
                     
@@ -323,23 +350,18 @@ def show():
                     
                     # Validação final considerando VOLTZ
                     problemas = []
-                    campos_obrigatorios_validacao = ['empresa', 'tipo', 'status', 'situacao', 'nome_cliente', 'classe', 'contrato', 'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip', 'data_vencimento']
                     
-                    # Verificar se algum arquivo é VOLTZ para ajustar validação
-                    tem_voltz = False
-                    campos_automaticos_voltz = []
-                    if hasattr(mapeador, 'identificar_tipo_distribuidora'):
-                        for nome_arquivo in arquivos_processados.keys():
-                            if mapeador.identificar_tipo_distribuidora(nome_arquivo) == "VOLTZ":
-                                tem_voltz = True
-                                campos_automaticos_voltz = ['empresa', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip']
-                                break
+                    # Usar função unificada para detectar VOLTZ
+                    tem_voltz = detectar_voltz(arquivos_processados, mapeador)
+                    
+                    # Definir campos obrigatórios baseado no tipo
+                    if tem_voltz:
+                        campos_obrigatorios_validacao = obter_campos_obrigatorios_voltz()
+                    else:
+                        campos_obrigatorios_validacao = obter_campos_obrigatorios_padrao()
                     
                     for campo in campos_obrigatorios_validacao:
                         if campo not in df_final_padronizado.columns:
-                            # Para VOLTZ, alguns campos são adicionados automaticamente
-                            if campo in campos_automaticos_voltz and tem_voltz:
-                                continue
                             problemas.append(f"❌ Campo {campo.replace('_', ' ').title()} não identificado")
                     
                     if problemas:
@@ -369,8 +391,17 @@ def show():
         df_padronizado = st.session_state.df_padronizado
         campos_mapeados = list(df_padronizado.columns)
         
+        # Detectar se é VOLTZ para ajustar campos principais usando função unificada
+        eh_voltz_resumo = detectar_voltz(st.session_state.df_carregado, mapeador)
+        
         # Agrupar campos por categoria
-        campos_principais = [col for col in campos_mapeados if col in ['empresa', 'tipo', 'status', 'situacao', 'nome_cliente', 'classe', 'contrato']]
+        if eh_voltz_resumo:
+            # Para VOLTZ: não incluir tipo, status, situacao, classe
+            campos_principais = [col for col in campos_mapeados if col in ['empresa', 'nome_cliente', 'contrato']]
+        else:
+            # Para outras distribuidoras: incluir todos
+            campos_principais = [col for col in campos_mapeados if col in ['empresa', 'tipo', 'status', 'situacao', 'nome_cliente', 'classe', 'contrato']]
+        
         campos_valores = [col for col in campos_mapeados if 'valor' in col.lower()]
         campos_datas = [col for col in campos_mapeados if 'data' in col.lower()]
         campos_outros = [col for col in campos_mapeados if col not in campos_principais + campos_valores + campos_datas]
@@ -411,11 +442,21 @@ def show():
         3. **Validação de conteúdo:** Verifica se o tipo de dados corresponde ao esperado
         4. **Sugestão de mapeamento:** Propõe o melhor mapeamento encontrado
         
-        **Campos obrigatórios:**
+        **Campos obrigatórios (Distribuidoras padrão):**
         - Empresa/Distribuidora
         - Tipo de cliente
         - Status da conta
+        - Situação
         - Nome do cliente
+        - Classe do cliente
+        - Contrato/Conta
+        - Valor principal
+        - Data de vencimento
+        
+        **Campos obrigatórios (VOLTZ):**
+        - Empresa/Distribuidora
+        - Nome do cliente
+        - Contrato/Conta
         - Valor principal
         - Data de vencimento
         
@@ -423,8 +464,6 @@ def show():
         - Valor não cedido
         - Valor terceiro
         - Valor CIP
-        - Classe do cliente
-        - Contrato/Conta
         """)
     
     with st.expander("✏️ Mapeamento Manual", expanded=False):

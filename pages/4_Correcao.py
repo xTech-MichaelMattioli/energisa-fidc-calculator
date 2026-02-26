@@ -8,15 +8,18 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import os
+import time
 from utils.calculador_aging import CalculadorAging
 from utils.calculador_correcao import CalculadorCorrecao
+from utils.calculador_valor_justo_distribuidoras import CalculadorValorJustoDistribuidoras, CalculadorValorJusto
 from utils.visualizador_voltz import VisualizadorVoltz
 from utils.visualizador_distribuidoras import VisualizadorDistribuidoras
 
 # Importar classe de valor justo do app original
 import requests
 from dateutil.relativedelta import relativedelta
-import numpy as np
+from openpyxl import load_workbook
+from io import BytesIO
 
 class CalculadorIndicesEconomicos:
     """
@@ -30,7 +33,7 @@ class CalculadorIndicesEconomicos:
     
     def carregar_indices_do_excel(self, arquivo_excel, aba_especifica=None):
         """
-        Carrega dados de IGP-M/IPCA do arquivo Excel
+        Carrega dados de IGP-M/IPCA do arquivo Excel usando openpyxl para maior robustez.
         Suporta duas estruturas:
         1. Aba IGPM_IPCA: Coluna C (Ano), Coluna D (Mês) e Coluna F (Índice IGP-M)
         2. Aba IGPM: Coluna A (Mês/Ano), Coluna B (Índice)
@@ -44,128 +47,197 @@ class CalculadorIndicesEconomicos:
             import streamlit as st
             import numpy as np
             from datetime import datetime
+            from openpyxl import load_workbook
+            from io import BytesIO
             
-            print("🔄 Carregando índices do arquivo Excel...")
+            print("🔄 Carregando índices do arquivo Excel com openpyxl...")
             
-            # Determinar qual aba usar
-            sheet_name = aba_especifica if aba_especifica else 0  # 0 = primeira aba por padrão
-            
-            if aba_especifica:
-                print(f"📊 Carregando da aba específica: {aba_especifica}")
+            # ===== PREPARAR ARQUIVO PARA OPENPYXL =====
+            if hasattr(arquivo_excel, 'read'):
+                # Se é um objeto file, ler bytes
+                if hasattr(arquivo_excel, 'seek'):
+                    arquivo_excel.seek(0)  # Voltar para o início
+                arquivo_bytes = BytesIO(arquivo_excel.read())
             else:
-                print("📊 Carregando da primeira aba do arquivo")
+                arquivo_bytes = arquivo_excel
             
-            # Ler o arquivo Excel completo primeiro para analisar
+            # ===== CARREGAR WORKBOOK COM OPENPYXL =====
             try:
-                df_completo = pd.read_excel(arquivo_excel, sheet_name=sheet_name)
-                print(f"📊 Arquivo carregado com {df_completo.shape[0]} linhas e {df_completo.shape[1]} colunas")
-                
-                # Detectar qual estrutura usar baseado na aba e no conteúdo
-                if aba_especifica == "IGPM":
-                    # Estrutura IGPM: Coluna A (Mês/Ano), Coluna B (Índice)
-                    print("📊 Detectada estrutura IGPM - usando colunas A (mês/ano) e B (índice)")
-                    
-                    if df_completo.shape[1] < 2:
-                        raise ValueError(f"Aba IGPM tem apenas {df_completo.shape[1]} colunas, mas precisa de pelo menos 2 (A-B)")
-                    
-                    # Extrair colunas A (0) e B (1) - Mês/Ano e Índice
-                    df = df_completo.iloc[:, [0, 1]].copy()
-                    df.columns = ['mes_ano', 'indice']
-                    
-                    # Processar coluna mes_ano para extrair ano e mês
-                    df = df.dropna(subset=['mes_ano'])
-                    
-                    # Converter mes_ano para string para processamento
-                    df['mes_ano'] = df['mes_ano'].astype(str)
-                    
-                    # Extrair ano e mês da string (formato: "agosto/1994")
-                    meses_dict = {
-                        'janeiro': 1, 'fevereiro': 2, 'março': 3, 'abril': 4, 'maio': 5, 'junho': 6,
-                        'julho': 7, 'agosto': 8, 'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12
-                    }
-                    
-                    # Separar mês e ano
-                    df_expandido = df['mes_ano'].str.split('/', expand=True)
-                    if df_expandido.shape[1] < 2:
-                        raise ValueError("Formato de data inválido na coluna A. Esperado: 'mês/ano'")
-                    
-                    df['mes_nome'] = df_expandido[0].str.strip().str.lower()
-                    df['ano'] = pd.to_numeric(df_expandido[1].str.strip(), errors='coerce')
-                    
-                    # Converter nome do mês para número
-                    df['mes'] = df['mes_nome'].map(meses_dict)
-                    
-                    # Remover linhas onde não conseguimos mapear o mês
-                    df = df.dropna(subset=['mes', 'ano'])
-                    df['mes'] = df['mes'].astype(int)
-                    df['ano'] = df['ano'].astype(int)
-                    
-                    print(f"📊 Processamento IGPM: {len(df)} registros com data válida")
-                    
+                workbook = load_workbook(arquivo_bytes, data_only=True, read_only=True)
+                print(f"📊 Workbook carregado. Abas disponíveis: {workbook.sheetnames}")
+            except Exception as e:
+                print(f"❌ Erro ao carregar workbook: {e}")
+                st.error(f"Erro ao abrir arquivo Excel: {e}")
+                return None
+            
+            # ===== DETERMINAR QUAL ABA USAR =====
+            if aba_especifica:
+                if aba_especifica in workbook.sheetnames:
+                    sheet_name = aba_especifica
+                    print(f"✅ Aba específica '{aba_especifica}' encontrada")
                 else:
-                    # Estrutura IGPM_IPCA: Coluna C (Ano), Coluna D (Mês) e Coluna F (Índice IGP-M)
-                    print("📊 Detectada estrutura IGPM_IPCA - usando colunas C (ano), D (mês) e F (índice)")
-                    
-                    # Verificar se tem pelo menos 6 colunas (A até F)
-                    if df_completo.shape[1] < 6:
-                        raise ValueError(f"Aba IGPM_IPCA tem apenas {df_completo.shape[1]} colunas, mas precisa de pelo menos 6 (A-F)")
-                    
-                    # Extrair colunas C (2), D (3) e F (5) - Ano, Mês e Índice IGP-M
-                    df = df_completo.iloc[:, [2, 3, 5]].copy()
-                    df.columns = ['ano', 'mes', 'indice']
+                    print(f"⚠️ Aba '{aba_especifica}' não encontrada. Abas disponíveis: {workbook.sheetnames}")
+                    # Tentar primeira aba como fallback
+                    sheet_name = workbook.sheetnames[0]
+                    print(f"📊 Usando primeira aba como fallback: '{sheet_name}'")
+            else:
+                # Usar primeira aba
+                sheet_name = workbook.sheetnames[0]
+                print(f"📊 Usando primeira aba: '{sheet_name}'")
+            
+            # ===== CARREGAR DADOS DA ABA SELECIONADA =====
+            try:
+                worksheet = workbook[sheet_name]
+                print(f"📊 Aba '{sheet_name}' carregada com {worksheet.max_row} linhas e {worksheet.max_column} colunas")
+                
+                # Converter worksheet para lista de listas para processamento
+                dados_brutos = []
+                for row in worksheet.iter_rows(values_only=True):
+                    dados_brutos.append(list(row))
+                
+                # Criar DataFrame a partir dos dados brutos
+                df_completo = pd.DataFrame(dados_brutos)
+                
+                # Remover linhas completamente vazias
+                df_completo = df_completo.dropna(how='all').reset_index(drop=True)
+                
+                print(f"📊 Dados extraídos: {df_completo.shape[0]} linhas e {df_completo.shape[1]} colunas (após limpeza)")
                 
             except Exception as e:
-                print(f"❌ Erro ao ler arquivo Excel: {e}")
-                # Se falhar com aba específica, tentar primeira aba
-                if aba_especifica:
-                    print(f"⚠️ Falha ao carregar aba '{aba_especifica}', tentando primeira aba...")
-                    try:
-                        df_completo = pd.read_excel(arquivo_excel, sheet_name=0)
-                        # Usar estrutura padrão IGMP_IPCA
-                        df = df_completo.iloc[:, [2, 3, 5]].copy()
-                        df.columns = ['ano', 'mes', 'indice']
-                        print("✅ Carregamento da primeira aba bem-sucedido")
-                    except:
-                        raise e
-                else:
-                    raise e
+                print(f"❌ Erro ao ler aba '{sheet_name}': {e}")
+                st.error(f"Erro ao ler aba '{sheet_name}': {e}")
+                return None
+            finally:
+                workbook.close()
             
-            # Padronizar as colunas para ['ano', 'mes', 'indice']
-            if 'mes_ano' in df.columns:
+            # ===== DETECTAR E PROCESSAR ESTRUTURA DOS DADOS =====
+            if aba_especifica == "IGPM":
+                print("📊 Processando estrutura IGPM - Colunas A (data) e B (índice)")
+                
+                if df_completo.shape[1] < 2:
+                    raise ValueError(f"Aba IGPM tem apenas {df_completo.shape[1]} colunas, mas precisa de pelo menos 2 (A-B)")
+                
+                # Extrair colunas A (0) e B (1) - Data e Índice
+                df = df_completo.iloc[:, [0, 1]].copy()
+                df.columns = ['data_excel', 'indice']
+                
+                # Remover linhas com dados nulos
+                df = df.dropna(subset=['data_excel']).copy()
+                
+                print(f"📊 Dados extraídos: {len(df)} linhas com data_excel e índice")
+                
+                # ===== PROCESSAR DIFERENTES FORMATOS DE DATA =====
+                df['ano'] = None
+                df['mes'] = None
+                
+                for idx, row in df.iterrows():
+                    data_valor = row['data_excel']
+                    
+                    try:
+                        # Caso 1: Data do Excel (datetime ou serial)
+                        if isinstance(data_valor, datetime):
+                            df.at[idx, 'ano'] = data_valor.year
+                            df.at[idx, 'mes'] = data_valor.month
+                            print(f"✅ Linha {idx}: Data Excel datetime - {data_valor.year}/{data_valor.month}")
+                            
+                        elif isinstance(data_valor, (int, float)):
+                            # Converter serial do Excel para datetime
+                            from datetime import timedelta
+                            # Excel epoch: 1900-01-01 (mas com bug do ano 1900)
+                            excel_epoch = datetime(1899, 12, 30)  # Correção do bug do Excel
+                            data_convertida = excel_epoch + timedelta(days=int(data_valor))
+                            df.at[idx, 'ano'] = data_convertida.year
+                            df.at[idx, 'mes'] = data_convertida.month
+                            print(f"✅ Linha {idx}: Serial Excel {data_valor} → {data_convertida.year}/{data_convertida.month}")
+                            
+                        elif isinstance(data_valor, str):
+                            # Caso 2: Formato texto "mês/ano"
+                            if '/' in str(data_valor):
+                                meses_dict = {
+                                    'janeiro': 1, 'fevereiro': 2, 'março': 3, 'abril': 4, 'maio': 5, 'junho': 6,
+                                    'julho': 7, 'agosto': 8, 'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12
+                                }
+                                
+                                partes = str(data_valor).split('/')
+                                if len(partes) >= 2:
+                                    mes_nome = partes[0].strip().lower()
+                                    ano_str = partes[1].strip()
+                                    
+                                    if mes_nome in meses_dict:
+                                        df.at[idx, 'mes'] = meses_dict[mes_nome]
+                                        df.at[idx, 'ano'] = int(ano_str)
+                                        print(f"✅ Linha {idx}: Texto '{data_valor}' → {int(ano_str)}/{meses_dict[mes_nome]}")
+                                    else:
+                                        print(f"⚠️ Linha {idx}: Mês '{mes_nome}' não reconhecido")
+                                else:
+                                    print(f"⚠️ Linha {idx}: Formato inválido '{data_valor}'")
+                            else:
+                                # Tentar converter string para datetime
+                                try:
+                                    data_convertida = pd.to_datetime(str(data_valor), errors='raise')
+                                    df.at[idx, 'ano'] = data_convertida.year
+                                    df.at[idx, 'mes'] = data_convertida.month
+                                    print(f"✅ Linha {idx}: String '{data_valor}' → {data_convertida.year}/{data_convertida.month}")
+                                except:
+                                    print(f"⚠️ Linha {idx}: Não foi possível converter '{data_valor}'")
+                        else:
+                            print(f"⚠️ Linha {idx}: Tipo não suportado {type(data_valor)}: {data_valor}")
+                            
+                    except Exception as e:
+                        print(f"❌ Linha {idx}: Erro ao processar '{data_valor}': {e}")
+                        continue
+                
+                # Remover linhas onde não conseguimos extrair ano e mês
+                df = df.dropna(subset=['ano', 'mes']).copy()
+                df['ano'] = df['ano'].astype(int)
+                df['mes'] = df['mes'].astype(int)
+                
+                print(f"📊 Processamento IGPM: {len(df)} registros com data válida")
+                
+            else:
+                print("📊 Processando estrutura IGPM_IPCA - Colunas C (ano), D (mês) e F (índice)")
+                
+                # Verificar se tem pelo menos 6 colunas (A até F)
+                if df_completo.shape[1] < 6:
+                    raise ValueError(f"Estrutura IGPM_IPCA tem apenas {df_completo.shape[1]} colunas, mas precisa de pelo menos 6 (A-F)")
+                
+                # Extrair colunas C (2), D (3) e F (5) - Ano, Mês e Índice IGP-M
+                df = df_completo.iloc[:, [2, 3, 5]].copy()
+                df.columns = ['ano', 'mes', 'indice']
+            
+            # ===== PADRONIZAR COLUNAS PARA ['ano', 'mes', 'indice'] =====
+            if 'data_excel' in df.columns:
                 # Para estrutura IGPM, já processamos e temos ano, mes, indice
                 df = df[['ano', 'mes', 'indice']].copy()
+            elif 'mes_ano' in df.columns:
+                # Fallback para formato antigo (se ainda existir)
+                df = df[['ano', 'mes', 'indice']].copy()
             
-            print(f"📊 Dados extraídos - ano, mês e índice padronizados")
+            print(f"📊 Dados padronizados - ano, mês e índice extraídos")
             
+            # ===== LIMPEZA E VALIDAÇÃO DOS DADOS =====
             # Limpar dados nulos
             df_original_len = len(df)
-            df = df.dropna()
+            df = df.dropna().copy()
             print(f"📊 Removidas {df_original_len - len(df)} linhas com valores nulos")
             
             # Processar colunas de ano e mês
-            print("🔄 Processando colunas de ano e mês...")
+            print("🔄 Processando e validando colunas de ano e mês...")
             
-            # Converter ano e mês para inteiros
+            # Converter ano e mês para inteiros com tratamento robusto
             try:
-                print(f"📊 Antes da conversão - Tipo ano: {df['ano'].dtype}, Tipo mês: {df['mes'].dtype}")
-                print(f"📊 Exemplos ano: {df['ano'].head(3).tolist()}")
-                print(f"📊 Exemplos mês: {df['mes'].head(3).tolist()}")
-                
                 df['ano'] = pd.to_numeric(df['ano'], errors='coerce').astype('Int64')
                 df['mes'] = pd.to_numeric(df['mes'], errors='coerce').astype('Int64')
                 
-                print(f"📊 Após conversão - Valores únicos ano: {sorted(df['ano'].dropna().unique())[:10]}")
-                print(f"📊 Após conversão - Valores únicos mês: {sorted(df['mes'].dropna().unique())}")
+                print(f"📊 Conversão bem-sucedida - Anos: {sorted(df['ano'].dropna().unique())[:5]}...")
+                print(f"📊 Meses únicos: {sorted(df['mes'].dropna().unique())}")
                 
             except Exception as conv_error:
-                print(f"⚠️ Erro ao converter ano/mês para números: {conv_error}")
-                # Tentar conversão manual
-                try:
-                    df['ano'] = df['ano'].astype(str).str.extract(r'(\d{4})')[0].astype(float).astype('Int64')
-                    df['mes'] = df['mes'].astype(str).str.extract(r'(\d{1,2})')[0].astype(float).astype('Int64')
-                    print("✅ Conversão manual bem-sucedida")
-                except:
-                    raise ValueError("Não foi possível converter ano (coluna C) e mês (coluna D) para números")
+                print(f"⚠️ Erro na conversão padrão: {conv_error}")
+                # Tentativa de conversão manual mais robusta
+                df['ano'] = df['ano'].astype(str).str.extract(r'(\d{4})')[0].astype(float).astype('Int64')
+                df['mes'] = df['mes'].astype(str).str.extract(r'(\d{1,2})')[0].astype(float).astype('Int64')
+                print("✅ Conversão manual aplicada com sucesso")
             
             # Remover linhas com ano/mês inválidos
             df_limpo = df.dropna(subset=['ano', 'mes']).copy()
@@ -177,40 +249,26 @@ class CalculadorIndicesEconomicos:
             df_filtrado = df_limpo[mask_ano_valido & mask_mes_valido].copy()
             
             if len(df_filtrado) == 0:
-                raise ValueError("Nenhuma data válida encontrada nas colunas C (ano) e D (mês)")
+                raise ValueError("Nenhuma data válida encontrada após validação")
             
             print(f"📊 {len(df_filtrado)} registros com ano/mês válidos")
             
-            # Criar coluna de data a partir do ano e mês
+            # ===== CRIAR COLUNA DE DATA =====
             try:
-                # Criar data no primeiro dia do mês usando uma abordagem mais robusta
                 df_filtrado['data'] = pd.to_datetime(
                     df_filtrado['ano'].astype(str) + '-' + df_filtrado['mes'].astype(str).str.zfill(2) + '-01',
                     format='%Y-%m-%d'
                 )
+                print(f"📊 {len(df_filtrado)} datas criadas com sucesso")
             except Exception as e:
-                print(f"❌ Erro ao criar datas (método 1): {e}")
-                # Método alternativo
-                try:
-                    datas_list = []
-                    for idx, row in df_filtrado.iterrows():
-                        ano = int(row['ano'])
-                        mes = int(row['mes'])
-                        data = datetime(ano, mes, 1)
-                        datas_list.append(data)
-                    df_filtrado['data'] = datas_list
-                except Exception as e2:
-                    print(f"❌ Erro ao criar datas (método 2): {e2}")
-                    raise ValueError("Erro ao combinar ano e mês em datas válidas")
+                print(f"❌ Erro ao criar datas: {e}")
+                raise ValueError("Erro ao combinar ano e mês em datas válidas")
             
-            print(f"📊 {len(df_filtrado)} datas criadas com sucesso")
-            
-            # Processar coluna de índice
-            print("🔄 Processando coluna de índice...")
+            # ===== PROCESSAR COLUNA DE ÍNDICE =====
+            print("🔄 Processando e validando coluna de índice...")
             
             # Converter índice para float, tratando vírgulas decimais brasileiras
             if df_filtrado['indice'].dtype == 'object':
-                # Se for texto, pode ter vírgulas como separador decimal (formato brasileiro)
                 df_filtrado['indice'] = df_filtrado['indice'].astype(str).str.replace(',', '.')
             
             # Converter para numérico
@@ -219,52 +277,35 @@ class CalculadorIndicesEconomicos:
             # Remover linhas com índices inválidos
             df_final = df_filtrado.dropna(subset=['indice']).copy()
             
-            # Verificar se temos valores válidos após conversão
             if len(df_final) == 0:
                 raise ValueError("Nenhum índice válido encontrado após conversão numérica")
             
-            print(f"📊 Conversão de índices: {len(df_filtrado)} → {len(df_final)} registros válidos")
-            print(f"📊 Exemplo de índices convertidos: {df_final['indice'].head(3).tolist()}")
+            print(f"📊 Índices convertidos: {len(df_filtrado)} → {len(df_final)} registros válidos")
             
+            # ===== FINALIZAR E VALIDAR =====
             # Manter apenas colunas necessárias
             df_final = df_final[['data', 'indice']].copy()
             
             # Ordenar por data
             df_final = df_final.sort_values('data').reset_index(drop=True)
             
-            # Validar se temos dados válidos
-            if len(df_final) == 0:
-                raise ValueError("Nenhum registro válido encontrado após processamento")
-            
-            # Verificar se os valores de índice fazem sentido (IGP-M base 100 em ago/1994)
-            indice_min = df_final['indice'].min()
-            indice_max = df_final['indice'].max()
-            
-            if indice_min < 50 or indice_max > 10000:
-                print(f"⚠️ Atenção: Valores de índice fora do esperado (min: {indice_min:.2f}, max: {indice_max:.2f})")
-            
-            # Verificar continuidade temporal
+            # Validações finais
             periodo_min = df_final['data'].min()
             periodo_max = df_final['data'].max()
-            meses_esperados = ((periodo_max.year - periodo_min.year) * 12) + (periodo_max.month - periodo_min.month) + 1
-            meses_encontrados = len(df_final)
-            
-            if meses_encontrados < (meses_esperados * 0.8):  # Pelo menos 80% dos meses esperados
-                print(f"⚠️ Atenção: Possível descontinuidade nos dados ({meses_encontrados} de {meses_esperados} meses esperados)")
+            indice_min = df_final['indice'].min()
+            indice_max = df_final['indice'].max()
             
             # Salvar resultado
             self.df_indices = df_final
             
-            print(f"✅ {len(df_final)} registros de índices carregados com sucesso!")
-            print(f"📊 Período: {df_final['data'].min().strftime('%Y-%m')} a {df_final['data'].max().strftime('%Y-%m')}")
-            print(f"📊 Índice inicial: {df_final['indice'].iloc[0]:.2f}")
-            print(f"📊 Índice final: {df_final['indice'].iloc[-1]:.2f}")
-            print(f"📊 Média do índice: {df_final['indice'].mean():.2f}")
+            print(f"✅ {len(df_final)} registros carregados com OPENPYXL!")
+            print(f"📊 Período: {periodo_min.strftime('%Y-%m')} a {periodo_max.strftime('%Y-%m')}")
+            print(f"📊 Índice: {indice_min:.2f} a {indice_max:.2f}")
             
             return self.df_indices
             
         except Exception as e:
-            error_msg = f"❌ Erro ao carregar índices do Excel: {str(e)}"
+            error_msg = f"❌ Erro ao carregar índices com openpyxl: {str(e)}"
             print(error_msg)
             if 'st' in locals():
                 st.error(f"Erro ao processar arquivo Excel: {str(e)}")
@@ -337,32 +378,49 @@ class CalculadorValorJusto:
     def carregar_dados_indices(self, arquivo_excel):
         """
         Carrega dados de índices do arquivo Excel.
-        Detecta automaticamente se deve usar aba específica para VOLTZ.
+        Para VOLTZ: carrega aba IGPM e salva em df_indices_igpm
+        Para outras distribuidoras: carrega aba IGPM_IPCA e salva em df_indices_economicos
         """
-        # Verificar se existe algum arquivo VOLTZ no session_state para determinar aba
-        aba_usar = None
-        
         # Detectar se é VOLTZ baseado nos arquivos carregados
+        eh_voltz = False
+        
         if 'df_dados_principais' in st.session_state:
             dados_principais = st.session_state.df_dados_principais
             if not dados_principais.empty and hasattr(dados_principais, 'attrs'):
                 nome_arquivo = dados_principais.attrs.get('nome_arquivo', '')
                 if 'VOLTZ' in nome_arquivo.upper():
-                    aba_usar = "IGPM"
-                    st.info("🔍 **VOLTZ detectado** - Carregando índices da aba específica 'IGPM'")
+                    eh_voltz = True
         
-        # Verificar também se existe informação sobre VOLTZ em outros lugares
-        if aba_usar is None and 'distribuidora_detectada' in st.session_state:
+        if not eh_voltz and 'distribuidora_detectada' in st.session_state:
             if st.session_state.distribuidora_detectada == 'VOLTZ':
-                aba_usar = "IGPM"
-                st.info("🔍 **VOLTZ detectado** - Carregando índices da aba específica 'IGPM'")
+                eh_voltz = True
         
-        if aba_usar:
-            st.success(f"⚡ **Modo VOLTZ ativado** - Usando aba '{aba_usar}' para índices IGP-M")
+        if eh_voltz:
+            # VOLTZ: Carregar apenas aba IGPM
+            st.info("🔍 **VOLTZ detectado** - Carregando dados da aba 'IGPM'")
+            df_igpm = self.calculador_indices.carregar_indices_do_excel(arquivo_excel, "IGPM")
+            if df_igpm is not None and not df_igpm.empty:
+                # Salvar dados IGP-M específicos para VOLTZ
+                st.session_state.df_indices_igpm = df_igpm
+                # Também salvar em df_indices_economicos para compatibilidade
+                st.session_state.df_indices_economicos = df_igpm
+                st.success("⚡ **VOLTZ**: Dados IGP-M da aba 'IGPM' carregados com sucesso!")
+                return df_igpm
+            else:
+                st.error("❌ Erro ao carregar dados da aba 'IGPM' para VOLTZ")
+                return None
         else:
-            st.info("📊 Usando primeira aba do arquivo para índices (padrão)")
-        
-        return self.calculador_indices.carregar_indices_do_excel(arquivo_excel, aba_usar)
+            # DISTRIBUIDORAS: Carregar aba IGPM_IPCA (padrão)
+            st.info("🏢 **Distribuidora Geral** - Carregando dados da primeira aba (IGPM_IPCA)")
+            df_ipca = self.calculador_indices.carregar_indices_do_excel(arquivo_excel, None)  # Primeira aba
+            if df_ipca is not None and not df_ipca.empty:
+                # Salvar dados IPCA para distribuidoras gerais
+                st.session_state.df_indices_economicos = df_ipca
+                st.success("🏢 **Distribuidoras**: Dados de índices carregados com sucesso!")
+                return df_ipca
+            else:
+                st.error("❌ Erro ao carregar dados de índices para distribuidoras")
+                return None
     
     def obter_indice_para_data(self, data_busca):
         """
@@ -431,10 +489,10 @@ class CalculadorValorJusto:
         # Verificar se temos coluna de taxa_recuperacao
         if 'taxa_recuperacao' in df_resultado.columns:            
             # Fórmula com DI-PRE: valor_justo = valor_corrigido * taxa_recuperacao * (fator_exponencial_di_pre + multa)
-            df_resultado['valor_justo'] = df_resultado[coluna_valor_corrigido] * df_resultado['taxa_recuperacao'] * (df_resultado['fator_exponencial_di_pre'] + df_resultado['multa_para_justo'])
+            df_resultado['valor_justo_ate_recebimento'] = df_resultado[coluna_valor_corrigido] * df_resultado['taxa_recuperacao'] * (df_resultado['fator_exponencial_di_pre'] + df_resultado['multa_para_justo'])
         else:
-            # Fallback sem taxa de recuperação
-            df_resultado['valor_justo'] = df_resultado[coluna_valor_corrigido] * (df_resultado['fator_exponencial_di_pre'] + df_resultado['multa_para_justo'])
+            st.error("❌ Taxa de recuperação não encontrada nos dados")
+            return
         
         return df_resultado
     
@@ -492,8 +550,11 @@ def show():
     # ETAPA 0: CARREGAMENTO DOS ÍNDICES IGP-M/IPCA (OBRIGATÓRIO)
     st.subheader("📊 0️⃣ Carregar Índices IGP-M/IPCA")
     
-    # Verificar se temos dados de índices carregados
-    tem_indices = 'df_indices_economicos' in st.session_state and not st.session_state.df_indices_economicos.empty
+    # Verificar se temos dados de índices carregados (qualquer uma das abas)
+    tem_indices = (
+        ('df_indices_economicos' in st.session_state and not st.session_state.df_indices_economicos.empty) or
+        ('df_indices_igpm' in st.session_state and not st.session_state.df_indices_igpm.empty)
+    )
     
     if not tem_indices:
         st.warning("⚠️ **PASSO 0:** Faça o upload do arquivo de índices IGP-M/IPCA para continuar.")
@@ -532,76 +593,162 @@ def show():
             
             # Upload do arquivo
             uploaded_file_indices = st.file_uploader(
-                "📤 Selecione o arquivo de Índices IGP-M/IPCA",
+                "📤 Selecione o arquivo de Índices IGP-M/IPCA (ambas as abas serão carregadas)",
                 type=['xlsx', 'xls'],
-                help="Arquivo Excel com índices econômicos. Suporta estruturas IGPM_IPCA (C,D,F) e IGPM (A,B)",
+                help="Arquivo Excel com índices econômicos. Sistema carregará automaticamente abas IGPM e IGPM_IPCA",
                 key="upload_indices_modulo4"
             )
             
             if uploaded_file_indices is not None:
                 try:
-                    with st.spinner("🔄 Processando arquivo de índices..."):
+                    with st.spinner("🔄 Processando arquivo de índices (carregando ambas as abas)..."):
                         # Criar instância do calculador
                         calc_valor_justo = CalculadorValorJusto()
                         
-                        # Carregar dados do Excel
-                        df_indices = calc_valor_justo.carregar_dados_indices(uploaded_file_indices)
+                        # ===== CARREGAR AMBAS AS ABAS SEPARADAMENTE =====
+                        st.info("📊 **Carregando aba IGPM** (para VOLTZ)...")
+                        df_igpm = calc_valor_justo.calculador_indices.carregar_indices_do_excel(uploaded_file_indices, "IGPM")
                         
-                        if df_indices is not None and not df_indices.empty:
-                            st.session_state.df_indices_economicos = df_indices
+                        st.info("📊 **Carregando aba IGMP_IPCA** (para outras distribuidoras)...")  
+                        df_ipca = calc_valor_justo.calculador_indices.carregar_indices_do_excel(uploaded_file_indices, None)  # Primeira aba
+                        
+                        # ===== VALIDAR E SALVAR DADOS =====
+                        dados_carregados = 0
+                        
+                        if df_igpm is not None and not df_igpm.empty:
+                            st.session_state.df_indices_igpm = df_igpm
+                            dados_carregados += 1
+                            st.success(f"✅ **Aba IGPM carregada:** {len(df_igpm):,} registros (para VOLTZ)")
+                        else:
+                            st.warning("⚠️ **Aba IGPM não encontrada** ou vazia")
+                        
+                        if df_ipca is not None and not df_ipca.empty:
+                            st.session_state.df_indices_economicos = df_ipca
+                            dados_carregados += 1
+                            st.success(f"✅ **Aba IGPM_IPCA carregada:** {len(df_ipca):,} registros (para distribuidoras)")
+                        else:
+                            st.warning("⚠️ **Aba IGPM_IPCA não encontrada** ou vazia")
+                        
+                        # ===== VERIFICAR SE PELO MENOS UMA ABA FOI CARREGADA =====
+                        if dados_carregados > 0:
                             st.session_state.calculador_valor_justo = calc_valor_justo
                             st.session_state.indices_carregados = True
                             
-                            st.success(f"✅ **{len(df_indices)} registros de índices carregados com sucesso!**")
+                            st.success(f"🎯 **{dados_carregados}/2 abas carregadas com sucesso!**")
                             
-                            # Mostrar estatísticas dos dados carregados
-                            col1, col2, col3 = st.columns(3)
+                            # ===== MOSTRAR ESTATÍSTICAS DE AMBAS AS ABAS =====
+                            col1, col2 = st.columns(2)
+                            
                             with col1:
-                                st.metric("📊 Total de Registros", f"{len(df_indices):,}")
-                            with col2:
-                                periodo_min = df_indices['data'].min().strftime('%Y-%m')
-                                periodo_max = df_indices['data'].max().strftime('%Y-%m')
-                                st.metric("📅 Período", f"{periodo_min} a {periodo_max}")
-                            with col3:
-                                indice_atual = df_indices['indice'].iloc[-1]
-                                st.metric("📈 Último Índice", f"{indice_atual:.2f}")
+                                if 'df_indices_igpm' in st.session_state:
+                                    df_stats = st.session_state.df_indices_igpm
+                                    st.write("**📊 IGPM (VOLTZ):**")
+                                    st.metric("Registros", f"{len(df_stats):,}")
+                                    if not df_stats.empty:
+                                        periodo_min = df_stats['data'].min().strftime('%Y-%m')
+                                        periodo_max = df_stats['data'].max().strftime('%Y-%m')
+                                        st.metric("Período", f"{periodo_min} a {periodo_max}")
+                                        indice_atual = df_stats['indice'].iloc[-1]
+                                        st.metric("Último Índice", f"{indice_atual:.2f}")
+                                else:
+                                    st.write("**❌ IGPM: Não carregado**")
                             
-                            # Mostrar preview dos dados (fora do expander)
-                            st.write("**📋 Preview dos Índices Carregados:**")
-                            st.dataframe(df_indices.head(10), use_container_width=True)
+                            with col2:
+                                if 'df_indices_economicos' in st.session_state:
+                                    df_stats = st.session_state.df_indices_economicos
+                                    st.write("**📊 IGPM_IPCA (Distribuidoras):**")
+                                    st.metric("Registros", f"{len(df_stats):,}")
+                                    if not df_stats.empty:
+                                        periodo_min = df_stats['data'].min().strftime('%Y-%m')
+                                        periodo_max = df_stats['data'].max().strftime('%Y-%m')
+                                        st.metric("Período", f"{periodo_min} a {periodo_max}")
+                                        indice_atual = df_stats['indice'].iloc[-1]
+                                        st.metric("Último Índice", f"{indice_atual:.2f}")
+                                else:
+                                    st.write("**❌ IGPM_IPCA: Não carregado**")
+                            
+                            # ===== MOSTRAR PREVIEW DAS DUAS ABAS =====
+                            st.write("**📋 Preview dos Dados Carregados:**")
+                            
+                            tab1, tab2 = st.tabs(["📊 IGPM (VOLTZ)", "📊 IGPM_IPCA (Distribuidoras)"])
+                            
+                            with tab1:
+                                if 'df_indices_igpm' in st.session_state:
+                                    st.dataframe(st.session_state.df_indices_igpm.head(10), use_container_width=True)
+                                else:
+                                    st.info("⚠️ Aba IGPM não foi carregada")
+                            
+                            with tab2:
+                                if 'df_indices_economicos' in st.session_state:
+                                    st.dataframe(st.session_state.df_indices_economicos.head(10), use_container_width=True)
+                                else:
+                                    st.info("⚠️ Aba IGPM_IPCA não foi carregada")
                             
                             st.rerun()
                         else:
-                            st.error("❌ Não foi possível processar o arquivo. Verifique a estrutura (colunas A e F).")
+                            st.error("❌ Nenhuma aba válida foi encontrada no arquivo Excel.")
+                            st.error("🔧 Verifique se o arquivo possui abas 'IGPM' e/ou dados na primeira aba.")
                             
                 except Exception as e:
                     st.error(f"❌ Erro ao processar arquivo: {str(e)}")
-                    st.error("Verifique se o arquivo possui as colunas A (data) e F (índice) com dados válidos.")
+                    st.error("🔧 Verifique se o arquivo possui as abas corretas e dados válidos.")
 
         # Se não tem índices, parar aqui
         return
     else:
         st.success("✅ **Índices IGP-M/IPCA carregados**")
-        registros_indices = len(st.session_state.df_indices_economicos)
-        periodo_min = st.session_state.df_indices_economicos['data'].min().strftime('%Y-%m')
-        periodo_max = st.session_state.df_indices_economicos['data'].max().strftime('%Y-%m')
-        st.info(f"📊 {registros_indices} registro(s) de índices disponível(eis) ({periodo_min} a {periodo_max})")
+        
+        
+        # Mostrar informações das abas carregadas
+        abas_carregadas = []
+        if 'df_indices_igpm' in st.session_state and not st.session_state.df_indices_igpm.empty:
+            registros_igpm = len(st.session_state.df_indices_igpm)
+            periodo_min_igpm = st.session_state.df_indices_igpm['data'].min().strftime('%Y-%m')
+            periodo_max_igpm = st.session_state.df_indices_igpm['data'].max().strftime('%Y-%m')
+            abas_carregadas.append(f"IGPM: {registros_igpm:,} registros ({periodo_min_igpm} a {periodo_max_igpm})")
+        
+        if 'df_indices_economicos' in st.session_state and not st.session_state.df_indices_economicos.empty:
+            registros_ipca = len(st.session_state.df_indices_economicos)
+            periodo_min_ipca = st.session_state.df_indices_economicos['data'].min().strftime('%Y-%m')
+            periodo_max_ipca = st.session_state.df_indices_economicos['data'].max().strftime('%Y-%m')
+            abas_carregadas.append(f"IGPM_IPCA: {registros_ipca:,} registros ({periodo_min_ipca} a {periodo_max_ipca})")
+        
+        for info in abas_carregadas:
+            st.info(f"📊 {info}")
         
         if st.button("🔄 Recarregar Índices", key="recarregar_indices"):
             st.session_state.indices_carregados = False
             st.session_state.taxa_recuperacao_carregada = False
             st.session_state.cdi_carregado = False
             st.session_state.calculo_solicitado = False
+            # Limpar ambos os DataFrames
             if 'df_indices_economicos' in st.session_state:
                 del st.session_state.df_indices_economicos
+            if 'df_indices_igpm' in st.session_state:
+                del st.session_state.df_indices_igpm
             if 'calculador_valor_justo' in st.session_state:
                 del st.session_state.calculador_valor_justo
             st.rerun()
 
-        # Mostrar o head dos dados num expander
+        # Mostrar preview das abas carregadas
         with st.expander("📊 Preview dos Índices Carregados", expanded=False):
-            if 'df_indices_economicos' in st.session_state:
-                st.dataframe(st.session_state.df_indices_economicos.head(10), use_container_width=True)
+            if 'df_indices_igpm' in st.session_state and 'df_indices_economicos' in st.session_state:
+                # Mostrar ambas as abas
+                tab1, tab2 = st.tabs(["📊 IGPM (VOLTZ)", "📊 IGPM_IPCA (Distribuidoras)"])
+                
+                with tab1:
+                    st.dataframe(st.session_state.df_indices_igpm, use_container_width=True)
+                
+                with tab2:
+                    st.dataframe(st.session_state.df_indices_economicos, use_container_width=True)
+            
+            elif 'df_indices_igpm' in st.session_state:
+                st.write("**📊 IGPM (VOLTZ):**")
+                st.dataframe(st.session_state.df_indices_igpm, use_container_width=True)
+            
+            elif 'df_indices_economicos' in st.session_state:
+                st.write("**📊 IGPM_IPCA (Distribuidoras):**")
+                st.dataframe(st.session_state.df_indices_economicos, use_container_width=True)
 
     st.markdown("---")
     
@@ -850,34 +997,16 @@ def show():
     
     # Seção de informações antes do cálculo
     st.write("**Informações do Processamento:**")
-    
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
+
+    col1, col2 = st.columns(2)
+
     with col1:
         st.metric("📊 Registros a Processar", f"{len(df_padronizado):,}")
     
     with col2:
         empresas_dados = df_padronizado['empresa'].nunique() if 'empresa' in df_padronizado.columns else 0
         st.metric("🏢 Empresas nos Dados", empresas_dados)
-    
-    with col3:
-        registros_indices = len(st.session_state.df_indices_economicos)
-        st.metric("📈 Registros Índices", registros_indices)
-    
-    with col4:
-        empresas_taxa = st.session_state.df_taxa_recuperacao['Empresa'].nunique()
-        st.metric("🏢 Empresas com Taxa", empresas_taxa)
-    
-    with col5:
-        registros_taxa = len(st.session_state.df_taxa_recuperacao)
-        st.metric("📈 Registros de Taxa", registros_taxa)
-    
-    with col6:
-        if eh_voltz:
-            st.metric("📊 Registros CDI", "N/A (VOLTZ)")
-        else:
-            registros_cdi = len(st.session_state.df_di_pre) if 'df_di_pre' in st.session_state else 0
-            st.metric("📊 Registros CDI", registros_cdi)
+
     
     # Verificar se todos os arquivos necessários estão carregados
     # TODAS as distribuidoras (incluindo VOLTZ) precisam de: índices, taxa de recuperação e CDI
@@ -907,17 +1036,8 @@ def show():
         
         try:
             # ========== DASHBOARD DE PROGRESSO EM TEMPO REAL ==========
-            st.markdown("### 🚀 **Processamento Ultra-Otimizado em Andamento**")
+            st.markdown("### 🚀 **Processamento em Andamento**")
             
-            # Container para métricas em tempo real
-            col_prog1, col_prog2, col_prog3 = st.columns(3)
-            
-            with col_prog1:
-                metric_registros = st.empty()
-            with col_prog2:
-                metric_velocidade = st.empty()
-            with col_prog3:
-                metric_tempo = st.empty()
             
             # Barra de progresso principal
             progress_main = st.progress(0)
@@ -952,12 +1072,6 @@ def show():
             with log_container:
                 st.success(f"✅ **Aging calculado:** {len(df_com_aging):,} registros em {etapa_tempo:.2f}s ({velocidade_aging:,.0f} reg/s)")
             
-            # Atualizar métricas
-            tempo_decorrido = time.time() - inicio_processamento
-            metric_registros.metric("📊 Registros", f"{len(df_com_aging):,}", f"{total_registros:,} total")
-            metric_velocidade.metric("⚡ Velocidade", f"{velocidade_aging:,.0f}", "registros/seg")
-            metric_tempo.metric("⏱️ Tempo", f"{tempo_decorrido:.1f}s", "decorrido")
-            
             # ========== ETAPA 2: DETECÇÃO AUTOMÁTICA (40%) ==========
             status_text.text("� Etapa 2/5: Detectando tipo de distribuidora e regras...")
             progress_main.progress(0.3)
@@ -978,517 +1092,874 @@ def show():
                 nome_arquivo_original,  # Passa o nome do arquivo para detecção
                 st.session_state.df_taxa_recuperacao
             )
-            
-            etapa_tempo = time.time() - etapa_inicio
-            progress_main.progress(0.4)
-            
-            velocidade_correcao = len(df_final_temp) / etapa_tempo if etapa_tempo > 0 else 0
-            
-            with log_container:
-                st.success(f"✅ **Correção base:** {len(df_final_temp):,} registros em {etapa_tempo:.2f}s ({velocidade_correcao:,.0f} reg/s)")
-            
-            # Detectar se é VOLTZ para mostrar no log
+
+            # Detectar se é VOLTZ para decidir o fluxo
             eh_voltz_detectado = 'VOLTZ' in nome_arquivo_original.upper()
-            with log_container:
-                if eh_voltz_detectado:
-                    st.info("🎯 **Sistema VOLTZ detectado** - Usando regras ultra-otimizadas")
-                else:
-                    st.info("🎯 **Sistema padrão detectado** - Usando regras tradicionais")
             
-            # Atualizar métricas
-            tempo_decorrido = time.time() - inicio_processamento
-            metric_registros.metric("📊 Registros", f"{len(df_final_temp):,}", "processados")
-            metric_velocidade.metric("⚡ Velocidade", f"{velocidade_correcao:,.0f}", "registros/seg")
-            metric_tempo.metric("⏱️ Tempo", f"{tempo_decorrido:.1f}s", "decorrido")
+            # ========== DEFINIR FUNÇÕES DE TRATAMENTO VOLTZ ==========
+            def tratar_tipagem_dataframe_voltz(df):
+                """
+                Método que identifica e trata automaticamente todas as colunas e suas tipagens
+                especificamente otimizado para dados VOLTZ
+                """
+                if df.empty:
+                    return df
                 
-            # ========== ETAPA 3: ÍNDICES CUSTOMIZADOS (60%) ==========
-            status_text.text("📈 Etapa 3/5: Aplicando índices econômicos customizados...")
-            progress_main.progress(0.5)
+                df_tratado = df.copy()
+                log_tipagem = []
+                
+                with st.expander("🔍 **Tratamento Automático de Tipagens - VOLTZ**", expanded=False):
+                    st.info("🤖 Analisando e otimizando tipos de dados automaticamente...")
+                    
+                    # Contadores para estatísticas
+                    colunas_numericas = 0
+                    colunas_datas = 0
+                    colunas_texto = 0
+                    colunas_otimizadas = 0
+                    
+                    progress_tipagem = st.progress(0)
+                    
+                    for i, col in enumerate(df_tratado.columns):
+                        try:
+                            # Atualizar progress bar
+                            progress_tipagem.progress((i + 1) / len(df_tratado.columns))
+                            
+                            # Amostrar dados para análise (para performance)
+                            amostra = df_tratado[col].dropna().head(1000)
+                            tipo_original = str(df_tratado[col].dtype)
+                            
+                            if amostra.empty:
+                                log_tipagem.append(f"⚠️ {col}: Coluna vazia - mantida como {tipo_original}")
+                                continue
+                            
+                            # 1. DETECTAR E TRATAR COLUNAS DE DATA
+                            if any(keyword in col.lower() for keyword in ['data', 'date', 'vencimento', 'emissao', 'base']):
+                                try:
+                                    # Tentar múltiplos formatos de data
+                                    df_tratado[col] = pd.to_datetime(df_tratado[col], 
+                                                                   errors='coerce', 
+                                                                   dayfirst=True,
+                                                                   format='mixed')
+                                    if not df_tratado[col].isna().all():
+                                        colunas_datas += 1
+                                        colunas_otimizadas += 1
+                                        log_tipagem.append(f"📅 {col}: {tipo_original} → datetime64")
+                                        continue
+                                except:
+                                    pass
+                            
+                            # 2. DETECTAR E TRATAR COLUNAS NUMÉRICAS
+                            # Verificar se é numerico (incluindo valores com vírgula brasileira)
+                            if df_tratado[col].dtype == 'object':
+                                # Tentar conversão de números com vírgula brasileira
+                                amostra_str = amostra.astype(str).str.replace(',', '.', regex=False)
+                                
+                                # Verificar se parece com número
+                                pattern_numerico = r'^-?\d+(\.\d+)?$'
+                                eh_numerico = amostra_str.str.match(pattern_numerico, na=False).sum() > (len(amostra) * 0.8)
+                                
+                                if eh_numerico:
+                                    try:
+                                        # Substituir vírgulas por pontos e converter
+                                        df_tratado[col] = df_tratado[col].astype(str).str.replace(',', '.', regex=False)
+                                        df_tratado[col] = pd.to_numeric(df_tratado[col], errors='coerce')
+                                        
+                                        # Otimizar tipo numérico
+                                        if df_tratado[col].isna().sum() < len(df_tratado) * 0.1:  # Menos de 10% NaN
+                                            # Verificar se são todos inteiros
+                                            if df_tratado[col].dropna().apply(lambda x: x.is_integer()).all():
+                                                # Otimizar tipo inteiro
+                                                min_val = df_tratado[col].min()
+                                                max_val = df_tratado[col].max()
+                                                
+                                                if min_val >= 0:
+                                                    if max_val <= 255:
+                                                        df_tratado[col] = df_tratado[col].astype('uint8')
+                                                    elif max_val <= 65535:
+                                                        df_tratado[col] = df_tratado[col].astype('uint16')
+                                                    elif max_val <= 4294967295:
+                                                        df_tratado[col] = df_tratado[col].astype('uint32')
+                                                    else:
+                                                        df_tratado[col] = df_tratado[col].astype('uint64')
+                                                else:
+                                                    if min_val >= -128 and max_val <= 127:
+                                                        df_tratado[col] = df_tratado[col].astype('int8')
+                                                    elif min_val >= -32768 and max_val <= 32767:
+                                                        df_tratado[col] = df_tratado[col].astype('int16')
+                                                    elif min_val >= -2147483648 and max_val <= 2147483647:
+                                                        df_tratado[col] = df_tratado[col].astype('int32')
+                                                    else:
+                                                        df_tratado[col] = df_tratado[col].astype('int64')
+                                            else:
+                                                # Usar float32 se possível, senão float64
+                                                df_tratado[col] = df_tratado[col].astype('float32')
+                                        
+                                        colunas_numericas += 1
+                                        colunas_otimizadas += 1
+                                        tipo_novo = str(df_tratado[col].dtype)
+                                        log_tipagem.append(f"🔢 {col}: {tipo_original} → {tipo_novo}")
+                                        continue
+                                    except:
+                                        pass
+                            
+                            # 3. OTIMIZAR COLUNAS DE TEXTO
+                            if df_tratado[col].dtype == 'object':
+                                # Verificar se pode ser categoria
+                                unique_ratio = df_tratado[col].nunique() / len(df_tratado)
+                                
+                                if unique_ratio < 0.1 and df_tratado[col].nunique() < 1000:  # Baixa cardinalidade
+                                    df_tratado[col] = df_tratado[col].astype('category')
+                                    colunas_otimizadas += 1
+                                    log_tipagem.append(f"📂 {col}: object → category (cardinalidade: {df_tratado[col].nunique()})")
+                                else:
+                                    # Tentar string mais eficiente
+                                    try:
+                                        df_tratado[col] = df_tratado[col].astype('string')
+                                        log_tipagem.append(f"📝 {col}: object → string")
+                                    except:
+                                        log_tipagem.append(f"📝 {col}: mantido como object")
+                                
+                                colunas_texto += 1
+                            
+                            # 4. OTIMIZAR COLUNAS BOOLEAN
+                            if df_tratado[col].dtype == 'bool' or amostra.isin([True, False, 0, 1, 'True', 'False', 'true', 'false']).all():
+                                try:
+                                    df_tratado[col] = df_tratado[col].astype('bool')
+                                    colunas_otimizadas += 1
+                                    log_tipagem.append(f"✅ {col}: → bool")
+                                except:
+                                    pass
+                            
+                        except Exception as e:
+                            log_tipagem.append(f"❌ {col}: Erro na tipagem - {str(e)[:50]}...")
+                            continue
+                    
+                    # Estatísticas finais
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("🔢 Numéricas", colunas_numericas, "otimizadas")
+                    with col2:
+                        st.metric("📅 Datas", colunas_datas, "convertidas")
+                    with col3:
+                        st.metric("📝 Texto", colunas_texto, "categorizadas")
+                    with col4:
+                        st.metric("⚡ Otimizadas", colunas_otimizadas, f"de {len(df_tratado.columns)}")
+                    
+                    # Comparar tamanhos
+                    memoria_original = df.memory_usage(deep=True).sum() / 1024 / 1024  # MB
+                    memoria_otimizada = df_tratado.memory_usage(deep=True).sum() / 1024 / 1024  # MB
+                    reducao_percentual = ((memoria_original - memoria_otimizada) / memoria_original) * 100
+                    
+                    st.success(f"✅ **Otimização completa!** Redução de memória: {reducao_percentual:.1f}% ({memoria_original:.1f}MB → {memoria_otimizada:.1f}MB)")
+                
+                return df_tratado
             
-            if 'calculador_valor_justo' in st.session_state and 'df_indices_economicos' in st.session_state:
+            def salvar_dados_tratados_voltz(df_tipado):
+                """
+                Método que cria botão para salvar os dados tratados na pasta 'data'
+                """
+                # Garantir que a pasta 'data' existe
+                data_path = os.path.join(os.getcwd(), 'data')
+                if not os.path.exists(data_path):
+                    os.makedirs(data_path)
+                    st.info(f"📁 Pasta 'data' criada em: {data_path}")
+                
+                # Interface para salvar
+                st.subheader("💾 **Exportar Dados VOLTZ Tratados**")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Opções de formato
+                    formato_export = st.selectbox(
+                        "Formato de exportação:",
+                        ["Excel (.xlsx)", "CSV (.csv)", "Pickle (.pkl)"],
+                        help="Escolha o formato para salvar os dados tratados"
+                    )
+                    
+                    # Nome do arquivo
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    nome_arquivo_default = f"VOLTZ_Dados_Tratados_{timestamp}"
+                    
+                    nome_arquivo = st.text_input(
+                        "Nome do arquivo:",
+                        value=nome_arquivo_default,
+                        help="Nome do arquivo (sem extensão)"
+                    )
+                
+                with col2:
+                    # Informações sobre o arquivo
+                    st.info(f"📊 **Registros:** {len(df_tipado):,}")
+                    st.info(f"📋 **Colunas:** {len(df_tipado.columns)}")
+                    memoria_mb = df_tipado.memory_usage(deep=True).sum() / 1024 / 1024
+                    st.info(f"💾 **Memória:** {memoria_mb:.1f} MB")
+                
+                # Botão de exportação
+                if st.button("🚀 **Salvar Dados Tratados**", type="primary"):
+                    try:
+                        # Determinar extensão e caminho
+                        if formato_export == "Excel (.xlsx)":
+                            extensao = ".xlsx"
+                            caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
+                            
+                            with st.spinner("📤 Salvando arquivo Excel..."):
+                                df_tipado.to_excel(caminho_arquivo, index=False)
+                                
+                        elif formato_export == "CSV (.csv)":
+                            extensao = ".csv"
+                            caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
+                            
+                            with st.spinner("📤 Salvando arquivo CSV..."):
+                                df_tipado.to_csv(caminho_arquivo, index=False, encoding='utf-8-sig')
+                                
+                        elif formato_export == "Pickle (.pkl)":
+                            extensao = ".pkl"
+                            caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
+                            
+                            with st.spinner("📤 Salvando arquivo Pickle..."):
+                                df_tipado.to_pickle(caminho_arquivo)
+                        
+                        # Verificar se arquivo foi criado
+                        if os.path.exists(caminho_arquivo):
+                            tamanho_arquivo = os.path.getsize(caminho_arquivo) / 1024 / 1024  # MB
+                            
+                            st.success(f"✅ **Arquivo salvo com sucesso!**")
+                            st.info(f"📁 **Localização:** `{caminho_arquivo}`")
+                            st.info(f"📊 **Tamanho:** {tamanho_arquivo:.1f} MB")
+                            st.info(f"⏰ **Timestamp:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+                            
+                            # Balões de comemoração
+                            st.balloons()
+                            
+                            # Log no session_state para histórico
+                            if 'historico_exports_voltz' not in st.session_state:
+                                st.session_state.historico_exports_voltz = []
+                            
+                            st.session_state.historico_exports_voltz.append({
+                                'timestamp': datetime.now(),
+                                'arquivo': caminho_arquivo,
+                                'formato': formato_export,
+                                'registros': len(df_tipado),
+                                'tamanho_mb': tamanho_arquivo
+                            })
+                            
+                        else:
+                            st.error("❌ Erro: Arquivo não foi criado corretamente")
+                            
+                    except Exception as e:
+                        st.error(f"❌ **Erro ao salvar arquivo:** {str(e)}")
+                        st.exception(e)
+                
+            # Para VOLTZ: o cálculo já está finalizado
+            if eh_voltz_detectado:
+                with log_container:
+                    st.success("⚡ **VOLTZ detectada:** Cálculo finalizado no processamento específico!")
+                
+                # Para VOLTZ, apenas aplicar o valor justo reajustado
+                df_final_temp = calc_correcao.calcular_valor_justo_reajustado(df_final_temp)
+                
+                # Finalizar processamento para VOLTZ
+                st.session_state.df_final = df_final_temp
+                st.session_state.df_com_aging = df_com_aging
+                
+                progress_main.progress(1.0)
+                etapa_tempo = time.time() - etapa_inicio
+                tempo_total = time.time() - inicio_processamento
+                
+                status_text.text("✅ Processamento VOLTZ concluído com sucesso!")
+                
+                # Métricas finais para VOLTZ
+                velocidade_total = len(df_final_temp) / tempo_total if tempo_total > 0 else 0
+                
+                metric_col1, metric_col2, metric_col3 = st.columns(3)
+                
+                with metric_col1:
+                    st.metric("📊 Registros", f"{len(df_final_temp):,}", "✅ VOLTZ")
+                with metric_col2:
+                    st.metric("⚡ Velocidade", f"{velocidade_total:,.0f}", "registros/seg")
+                with metric_col3:
+                    st.metric("⏱️ Tempo Total", f"{tempo_total:.1f}s", "🎯 Ultra-rápido")
+                
+                with log_container:
+                    st.balloons()
+                    st.success("🎉 **PROCESSAMENTO VOLTZ ULTRA-OTIMIZADO CONCLUÍDO!**")
+                    st.info(f"⚡ **VOLTZ Performance:** {len(df_final_temp):,} registros em {tempo_total:.2f}s")
+                    st.info(f"🚀 **Throughput VOLTZ:** {velocidade_total:,.0f} registros/segundo")
+                
+
+                # ========== TRATAMENTO AUTOMÁTICO DE TIPAGENS VOLTZ ==========
+                def tratar_tipagem_dataframe_voltz(df):
+                    """
+                    Método que identifica e trata automaticamente todas as colunas e suas tipagens
+                    especificamente otimizado para dados VOLTZ
+                    """
+                    if df.empty:
+                        return df
+                    
+                    df_tratado = df.copy()
+                    log_tipagem = []
+                    
+                    with st.expander("🔍 **Tratamento Automático de Tipagens - VOLTZ**", expanded=False):
+                        st.info("🤖 Analisando e otimizando tipos de dados automaticamente...")
+                        
+                        # Contadores para estatísticas
+                        colunas_numericas = 0
+                        colunas_datas = 0
+                        colunas_texto = 0
+                        colunas_otimizadas = 0
+                        
+                        progress_tipagem = st.progress(0)
+                        
+                        for i, col in enumerate(df_tratado.columns):
+                            try:
+                                # Atualizar progress bar
+                                progress_tipagem.progress((i + 1) / len(df_tratado.columns))
+                                
+                                # Amostrar dados para análise (para performance)
+                                amostra = df_tratado[col].dropna().head(1000)
+                                tipo_original = str(df_tratado[col].dtype)
+                                
+                                if amostra.empty:
+                                    log_tipagem.append(f"⚠️ {col}: Coluna vazia - mantida como {tipo_original}")
+                                    continue
+                                
+                                # 1. DETECTAR E TRATAR COLUNAS DE DATA
+                                if any(keyword in col.lower() for keyword in ['data', 'date', 'vencimento', 'emissao', 'base']):
+                                    try:
+                                        # Tentar múltiplos formatos de data
+                                        df_tratado[col] = pd.to_datetime(df_tratado[col], 
+                                                                       errors='coerce', 
+                                                                       dayfirst=True,
+                                                                       format='mixed')
+                                        if not df_tratado[col].isna().all():
+                                            colunas_datas += 1
+                                            colunas_otimizadas += 1
+                                            log_tipagem.append(f"📅 {col}: {tipo_original} → datetime64")
+                                            continue
+                                    except:
+                                        pass
+                                
+                                # 2. DETECTAR E TRATAR COLUNAS NUMÉRICAS
+                                # Verificar se é numerico (incluindo valores com vírgula brasileira)
+                                if df_tratado[col].dtype == 'object':
+                                    # Tentar conversão de números com vírgula brasileira
+                                    amostra_str = amostra.astype(str).str.replace(',', '.', regex=False)
+                                    
+                                    # Verificar se parece com número
+                                    pattern_numerico = r'^-?\d+(\.\d+)?$'
+                                    eh_numerico = amostra_str.str.match(pattern_numerico, na=False).sum() > (len(amostra) * 0.8)
+                                    
+                                    if eh_numerico:
+                                        try:
+                                            # Substituir vírgulas por pontos e converter
+                                            df_tratado[col] = df_tratado[col].astype(str).str.replace(',', '.', regex=False)
+                                            df_tratado[col] = pd.to_numeric(df_tratado[col], errors='coerce')
+                                            
+                                            # Otimizar tipo numérico
+                                            if df_tratado[col].isna().sum() < len(df_tratado) * 0.1:  # Menos de 10% NaN
+                                                # Verificar se são todos inteiros
+                                                if df_tratado[col].dropna().apply(lambda x: x.is_integer()).all():
+                                                    # Otimizar tipo inteiro
+                                                    min_val = df_tratado[col].min()
+                                                    max_val = df_tratado[col].max()
+                                                    
+                                                    if min_val >= 0:
+                                                        if max_val <= 255:
+                                                            df_tratado[col] = df_tratado[col].astype('uint8')
+                                                        elif max_val <= 65535:
+                                                            df_tratado[col] = df_tratado[col].astype('uint16')
+                                                        elif max_val <= 4294967295:
+                                                            df_tratado[col] = df_tratado[col].astype('uint32')
+                                                        else:
+                                                            df_tratado[col] = df_tratado[col].astype('uint64')
+                                                    else:
+                                                        if min_val >= -128 and max_val <= 127:
+                                                            df_tratado[col] = df_tratado[col].astype('int8')
+                                                        elif min_val >= -32768 and max_val <= 32767:
+                                                            df_tratado[col] = df_tratado[col].astype('int16')
+                                                        elif min_val >= -2147483648 and max_val <= 2147483647:
+                                                            df_tratado[col] = df_tratado[col].astype('int32')
+                                                        else:
+                                                            df_tratado[col] = df_tratado[col].astype('int64')
+                                                else:
+                                                    # Usar float32 se possível, senão float64
+                                                    df_tratado[col] = df_tratado[col].astype('float32')
+                                            
+                                            colunas_numericas += 1
+                                            colunas_otimizadas += 1
+                                            tipo_novo = str(df_tratado[col].dtype)
+                                            log_tipagem.append(f"🔢 {col}: {tipo_original} → {tipo_novo}")
+                                            continue
+                                        except:
+                                            pass
+                                
+                                # 3. OTIMIZAR COLUNAS DE TEXTO
+                                if df_tratado[col].dtype == 'object':
+                                    # Verificar se pode ser categoria
+                                    unique_ratio = df_tratado[col].nunique() / len(df_tratado)
+                                    
+                                    if unique_ratio < 0.1 and df_tratado[col].nunique() < 1000:  # Baixa cardinalidade
+                                        df_tratado[col] = df_tratado[col].astype('category')
+                                        colunas_otimizadas += 1
+                                        log_tipagem.append(f"📂 {col}: object → category (cardinalidade: {df_tratado[col].nunique()})")
+                                    else:
+                                        # Tentar string mais eficiente
+                                        try:
+                                            df_tratado[col] = df_tratado[col].astype('string')
+                                            log_tipagem.append(f"📝 {col}: object → string")
+                                        except:
+                                            log_tipagem.append(f"📝 {col}: mantido como object")
+                                    
+                                    colunas_texto += 1
+                                
+                                # 4. OTIMIZAR COLUNAS BOOLEAN
+                                if df_tratado[col].dtype == 'bool' or amostra.isin([True, False, 0, 1, 'True', 'False', 'true', 'false']).all():
+                                    try:
+                                        df_tratado[col] = df_tratado[col].astype('bool')
+                                        colunas_otimizadas += 1
+                                        log_tipagem.append(f"✅ {col}: → bool")
+                                    except:
+                                        pass
+                                
+                            except Exception as e:
+                                log_tipagem.append(f"❌ {col}: Erro na tipagem - {str(e)[:50]}...")
+                                continue
+                        
+                        # Estatísticas finais
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.metric("🔢 Numéricas", colunas_numericas, "otimizadas")
+                        with col2:
+                            st.metric("📅 Datas", colunas_datas, "convertidas")
+                        with col3:
+                            st.metric("📝 Texto", colunas_texto, "categorizadas")
+                        with col4:
+                            st.metric("⚡ Otimizadas", colunas_otimizadas, f"de {len(df_tratado.columns)}")
+                        
+                        # Comparar tamanhos
+                        memoria_original = df.memory_usage(deep=True).sum() / 1024 / 1024  # MB
+                        memoria_otimizada = df_tratado.memory_usage(deep=True).sum() / 1024 / 1024  # MB
+                        reducao_percentual = ((memoria_original - memoria_otimizada) / memoria_original) * 100
+                        
+                        st.success(f"✅ **Otimização completa!** Redução de memória: {reducao_percentual:.1f}% ({memoria_original:.1f}MB → {memoria_otimizada:.1f}MB)")
+                    
+                    return df_tratado
+                
+                # Aplicar tratamento de tipagem no dataframe VOLTZ
+                st.info("🔧 **Aplicando tratamento automático de tipagens...**")
+                df_final_temp_tipado = tratar_tipagem_dataframe_voltz(df_final_temp)
+                
+                # Atualizar no session_state
+                st.session_state.df_final_voltz_tipado = df_final_temp_tipado
+                
+                # ========== BOTÃO PARA SALVAR DADOS TRATADOS ==========
+                def salvar_dados_tratados_voltz(df_tipado):
+                    """
+                    Método que cria botão para salvar os dados tratados na pasta 'data'
+                    """
+                    # Garantir que a pasta 'data' existe
+                    data_path = os.path.join(os.getcwd(), 'data')
+                    if not os.path.exists(data_path):
+                        os.makedirs(data_path)
+                        st.info(f"📁 Pasta 'data' criada em: {data_path}")
+                    
+                    # Interface para salvar
+                    st.subheader("💾 **Exportar Dados VOLTZ Tratados**")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Opções de formato
+                        formato_export = st.selectbox(
+                            "Formato de exportação:",
+                            ["Excel (.xlsx)", "CSV (.csv)", "Pickle (.pkl)"],
+                            help="Escolha o formato para salvar os dados tratados"
+                        )
+                        
+                        # Nome do arquivo
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        nome_arquivo_default = f"VOLTZ_Dados_Tratados_{timestamp}"
+                        
+                        nome_arquivo = st.text_input(
+                            "Nome do arquivo:",
+                            value=nome_arquivo_default,
+                            help="Nome do arquivo (sem extensão)"
+                        )
+                    
+                    with col2:
+                        # Informações sobre o arquivo
+                        st.info(f"📊 **Registros:** {len(df_tipado):,}")
+                        st.info(f"📋 **Colunas:** {len(df_tipado.columns)}")
+                        memoria_mb = df_tipado.memory_usage(deep=True).sum() / 1024 / 1024
+                        st.info(f"💾 **Memória:** {memoria_mb:.1f} MB")
+                    
+                    # Botão de exportação
+                    if st.button("🚀 **Salvar Dados Tratados**", type="primary"):
+                        try:
+                            # Determinar extensão e caminho
+                            if formato_export == "Excel (.xlsx)":
+                                extensao = ".xlsx"
+                                caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
+                                
+                                with st.spinner("📤 Salvando arquivo Excel..."):
+                                    df_tipado.to_excel(caminho_arquivo, index=False)
+                                    
+                            elif formato_export == "CSV (.csv)":
+                                extensao = ".csv"
+                                caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
+                                
+                                with st.spinner("📤 Salvando arquivo CSV..."):
+                                    df_tipado.to_csv(caminho_arquivo, index=False, encoding='utf-8-sig')
+                                    
+                            elif formato_export == "Pickle (.pkl)":
+                                extensao = ".pkl"
+                                caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
+                                
+                                with st.spinner("📤 Salvando arquivo Pickle..."):
+                                    df_tipado.to_pickle(caminho_arquivo)
+                            
+                            # Verificar se arquivo foi criado
+                            if os.path.exists(caminho_arquivo):
+                                tamanho_arquivo = os.path.getsize(caminho_arquivo) / 1024 / 1024  # MB
+                                
+                                st.success(f"✅ **Arquivo salvo com sucesso!**")
+                                st.info(f"📁 **Localização:** `{caminho_arquivo}`")
+                                st.info(f"📊 **Tamanho:** {tamanho_arquivo:.1f} MB")
+                                st.info(f"⏰ **Timestamp:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+                                
+                                # Balões de comemoração
+                                st.balloons()
+                                
+                                # Log no session_state para histórico
+                                if 'historico_exports_voltz' not in st.session_state:
+                                    st.session_state.historico_exports_voltz = []
+                                
+                                st.session_state.historico_exports_voltz.append({
+                                    'timestamp': datetime.now(),
+                                    'arquivo': caminho_arquivo,
+                                    'formato': formato_export,
+                                    'registros': len(df_tipado),
+                                    'tamanho_mb': tamanho_arquivo
+                                })
+                                
+                            else:
+                                st.error("❌ Erro: Arquivo não foi criado corretamente")
+                                
+                        except Exception as e:
+                            st.error(f"❌ **Erro ao salvar arquivo:** {str(e)}")
+                            st.exception(e)
+
+                
+                # Chamar função de salvamento
+                salvar_dados_tratados_voltz(df_final_temp_tipado)
+
+                # Para VOLTZ, terminar aqui
+                return
+            else:
+                etapa_tempo = time.time() - etapa_inicio
+                progress_main.progress(0.4)
+                
+                # Detectar se é VOLTZ para mostrar no log
+                eh_voltz_detectado = 'VOLTZ' in nome_arquivo_original.upper()
+                with log_container:
+                    if eh_voltz_detectado:
+                        st.info("🎯 **Sistema VOLTZ detectado**")
+                    else:
+                        st.info("🎯 **Sistema padrão detectado**")
+                    
+                # ========== ETAPA 3: ÍNDICES CUSTOMIZADOS (60%) ==========
+                status_text.text("📈 Etapa 3/5: Aplicando índices econômicos customizados...")
+                progress_main.progress(0.5)
+                
+                # ========== VERIFICAR SE TEMOS ÍNDICES CUSTOMIZADOS ==========
+                tem_indices_economicos = 'df_indices_economicos' in st.session_state and not st.session_state.df_indices_economicos.empty
+                tem_indices_igpm = 'df_indices_igpm' in st.session_state and not st.session_state.df_indices_igpm.empty
+                
+                if tem_indices_economicos or tem_indices_igpm:
+                    etapa_inicio = time.time()
+                    
+                    with log_container:
+                        st.info("📊 **Iniciando merge vetorizado** de índices temporais...")
+
+                    # ========== SELEÇÃO INTELIGENTE DOS ÍNDICES ==========
+                    # Detectar se é VOLTZ para usar índices corretos
+                    if eh_voltz_detectado and tem_indices_igpm:
+                        # VOLTZ: Usar aba IGPM
+                        df_indices = st.session_state.df_indices_igpm.copy()
+                        tipo_indice = "IGPM (VOLTZ)"
+                        with log_container:
+                            st.info("⚡ **VOLTZ detectada:** Usando índices da aba IGPM")
+                    elif tem_indices_economicos:
+                        # DISTRIBUIDORAS: Usar aba IGPM_IPCA
+                        df_indices = st.session_state.df_indices_economicos.copy()
+                        tipo_indice = "IGPM_IPCA (Distribuidoras)"
+                        with log_container:
+                            st.info("🏢 **Distribuidora padrão:** Usando índices da aba IGPM_IPCA")
+                    else:
+                        # Fallback: usar qualquer índice disponível
+                        if tem_indices_igpm:
+                            df_indices = st.session_state.df_indices_igpm.copy()
+                            tipo_indice = "IGPM (Fallback)"
+                        else:
+                            df_indices = st.session_state.df_indices_economicos.copy()
+                            tipo_indice = "IGPM_IPCA (Fallback)"
+                        
+                        with log_container:
+                            st.warning(f"⚠️ **Fallback:** Usando {tipo_indice}")
+                    
+                    # ========== PROCESSAR ÍNDICES SELECIONADOS ==========
+                    with log_container:
+                        registros_indices = len(df_indices)
+                        periodo_min = df_indices['data'].min().strftime('%Y-%m')
+                        periodo_max = df_indices['data'].max().strftime('%Y-%m')
+                        st.success(f"✅ **Índices carregados:** {tipo_indice} - {registros_indices:,} registros ({periodo_min} a {periodo_max})")
+                    
+                    df_indices['data'] = pd.to_datetime(df_indices['data'])
+                    df_indices = df_indices.sort_values('data')
+                    
+                    # Criar índices com mês anterior para cálculo da taxa mensal
+                    df_indices['data_mes_anterior'] = df_indices['data'].shift(1)
+                    df_indices['indice_mes_anterior'] = df_indices['indice'].shift(1)
+                    
+                    # Calcular taxa mensal = indice_atual - indice_anterior (diferença simples)
+                    df_indices['taxa_mensal'] = 1 - df_indices['indice_mes_anterior'] / df_indices['indice']
+                    df_indices['taxa_diaria'] = (df_indices['taxa_mensal'] + 1) ** (1/30) - 1
+
+                    # Preparar DataFrame principal
+                    df_final_temp = df_final_temp.copy()
+                    df_final_temp['data_vencimento_limpa'] = pd.to_datetime(df_final_temp['data_vencimento_limpa'], errors='coerce')
+                    df_final_temp['data_base'] = pd.to_datetime(df_final_temp['data_base'], errors='coerce')
+
+                    progress_main.progress(0.52)
+                    
+                    # ==== MERGE 1: DATA BASE (ULTRA-OTIMIZADO) ====
+                    with log_container:
+                        st.info("🔄 **Merge 1/2:** Índices da data base (O(log n))...")
+                    
+                    # Criar coluna auxiliar para merge (ano-mês)
+                    df_indices['ano_mes'] = df_indices['data'].dt.to_period('M')
+                    df_final_temp['ano_mes_base'] = df_final_temp['data_base'].dt.to_period('M')
+                    df_final_temp['ano_mes_venc'] = df_final_temp['data_vencimento_limpa'].dt.to_period('M')
+                    
+                    # Merge com data base
+                    df_merged_base = df_final_temp.merge(
+                        df_indices[['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal','taxa_diaria']].rename(columns={
+                            'ano_mes': 'ano_mes_base',
+                            'indice': 'indice_mes_base',
+                            'indice_mes_anterior': 'indice_mes_anterior_base',
+                            'taxa_mensal': 'taxa_mensal_base',
+                            'taxa_diaria': 'taxa_diaria_base'
+                        }),
+                        on='ano_mes_base',
+                        how='left'
+                    )
+                    
+                    progress_main.progress(0.54)
+                    
+                    # ==== MERGE 2: DATA VENCIMENTO (ULTRA-OTIMIZADO) ====
+                    with log_container:
+                        st.info("🔄 **Merge 2/2:** Índices da data vencimento (O(log n))...")
+                        
+                    df_merged_completo = df_merged_base.merge(
+                        df_indices[['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal','taxa_diaria']].rename(columns={
+                            'ano_mes': 'ano_mes_venc',
+                            'indice': 'indice_mes_venc',
+                            'indice_mes_anterior': 'indice_mes_anterior_venc',
+                            'taxa_mensal': 'taxa_mensal_venc',
+                            'taxa_diaria': 'taxa_diaria_venc'
+                        }),
+                        on='ano_mes_venc',
+                        how='left'
+                    )
+                    
+                    progress_main.progress(0.56)
+                    
+                    # ==== CÁLCULO DOS ÍNDICES DIÁRIOS (VETORIZADO) ====
+                    with log_container:
+                        st.info("🧮 **Cálculo vetorizado** de índices diários...")
+                    
+                    # Função para calcular índice na data específica
+                    def calcular_indice_diario(row, tipo='base'):
+                        if tipo == 'base':
+                            data = row['data_base']
+                            indice_mes = row['indice_mes_base']
+                            indice_mes_anterior = row['indice_mes_anterior_base']
+                            taxa_mensal = row['taxa_mensal_base']
+                            taxa_diaria = row['taxa_diaria_base']
+                            data_fechamento = row['data_base']
+                        else:  # vencimento
+                            data = row['data_vencimento_limpa']
+                            indice_mes = row['indice_mes_venc']
+                            indice_mes_anterior = row['indice_mes_anterior_venc']
+                            taxa_mensal = row['taxa_mensal_venc']
+                            taxa_diaria = row['taxa_diaria_venc']
+                            data_fechamento = row['data_vencimento_limpa']
+                        
+                        if pd.isna(data) or pd.isna(indice_mes) or pd.isna(taxa_mensal):
+                            return indice_mes if not pd.isna(indice_mes) else np.nan
+                        
+                        # Se a data é o último dia do mês de data_fechamento, usar índice direto
+                        ultimo_dia_mes = (data_fechamento + pd.offsets.MonthEnd(0)).day
+                        if data.day == ultimo_dia_mes:
+                            return indice_mes
+                        
+                        # Calcular dias do período
+                        dias_periodo = data.day
+                        
+                        # Taxa do período
+                        taxa_periodo = ((1 + taxa_diaria) ** (dias_periodo) - 1)
+
+                        # Índice na data
+                        indice_na_data = (indice_mes_anterior * taxa_periodo) + indice_mes_anterior 
+
+                        return indice_na_data
+                    
+                    # Aplicar cálculo vetorizado
+                    with log_container:
+                        st.info("🔄 **Aplicando** índices data base...")
+                    df_merged_completo['indice_base_diario'] = df_merged_completo.apply(
+                        lambda row: calcular_indice_diario(row, 'base'), axis=1
+                    )
+                    
+                    progress_main.progress(0.58)
+                    
+                    with log_container:
+                        st.info("🔄 **Aplicando** índices data vencimento...")
+                    df_merged_completo['indice_venc_diario'] = df_merged_completo.apply(
+                        lambda row: calcular_indice_diario(row, 'vencimento'), axis=1
+                    )
+                    
+                    # ==== CÁLCULO DO FATOR DE CORREÇÃO (ULTRA-RÁPIDO) ====
+                    # Mask para registros válidos
+                    mask_validos = (
+                        df_merged_completo['indice_base_diario'].notna()
+                        & df_merged_completo['indice_venc_diario'].notna()
+                        & (df_merged_completo['indice_base_diario'] > 0)
+                        & (df_merged_completo['indice_venc_diario'] > 0)
+                    )
+                    
+                    # Fator de correção = indice_vencimento / indice_base
+                    df_merged_completo['fator_correcao'] = 1.0  # Default
+                    df_merged_completo.loc[mask_validos, 'fator_correcao'] = (
+                        df_merged_completo.loc[mask_validos, 'indice_base_diario'] /
+                        df_merged_completo.loc[mask_validos, 'indice_venc_diario']
+                    )
+                    
+                    # ==== APLICAR CORREÇÃO MONETÁRIA (VETORIZADA) ====
+                    df_merged_completo['correcao_monetaria'] = np.maximum(
+                        df_merged_completo['valor_liquido'] *
+                        (df_merged_completo['fator_correcao'] - 1),
+                        0
+                    )
+
+                    df_merged_completo['valor_corrigido'] = (
+                        df_merged_completo['valor_liquido'] +
+                        df_merged_completo['multa'] +
+                        df_merged_completo['juros_moratorios'] +
+                        df_merged_completo['correcao_monetaria']
+                    )
+
+                    if 'taxa_recuperacao' in df_merged_completo.columns:
+                        df_merged_completo['valor_recuperavel_ate_data_base'] = (
+                            df_merged_completo['valor_corrigido'] *
+                            df_merged_completo['taxa_recuperacao']
+                        )
+
+                    # Atualizar colunas finais
+                    df_merged_completo.loc[mask_validos, 'indice_vencimento'] = df_merged_completo.loc[mask_validos, 'indice_venc_diario']
+                    df_merged_completo.loc[mask_validos, 'indice_base'] = df_merged_completo.loc[mask_validos, 'indice_base_diario']
+
+                    registros_customizados = mask_validos.sum()
+                    total_registros = len(df_merged_completo)
+                    percentual = (registros_customizados / total_registros) * 100
+
+                    # Limpar colunas auxiliares
+                    colunas_temp = [
+                        'ano_mes_base', 'ano_mes_venc', 'indice_mes_base', 'indice_mes_venc',
+                        'taxa_mensal_base', 'taxa_mensal_venc', 'data_fechamento_base', 'data_fechamento_venc',
+                        'indice_base_diario', 'indice_venc_diario', 'indice_mes_anterior_base', 'taxa_diaria_base', 'indice_mes_anterior_venc', 'taxa_diaria_venc'
+                    ]
+                    df_final_temp = df_merged_completo.drop(columns=[col for col in colunas_temp if col in df_merged_completo.columns])
+                    
+                    etapa_tempo = time.time() - etapa_inicio
+                    velocidade_indices = registros_customizados / etapa_tempo if etapa_tempo > 0 else 0
+                    
+                    with log_container:
+                        st.success(f"✅ **Índices customizados aplicados:** {registros_customizados:,}/{total_registros:,} registros ({percentual:.1f}%) em {etapa_tempo:.2f}s ({velocidade_indices:,.0f} reg/s)")
+                    
+                else:
+                    with log_container:
+                        st.info("ℹ️ **Usando correção padrão** do sistema (IGPM/IPCA automático)")
+
+                
+                # ========== ETAPA 4: CÁLCULO DE CORREÇÃO MONETÁRIA FINAL (80%) ==========
+                status_text.text("� Etapa 4/5: Calculando correção monetária final...")
+                progress_main.progress(0.7)
+                
                 etapa_inicio = time.time()
                 
-                with log_container:
-                    st.info("📊 **Iniciando merge vetorizado** de índices temporais...")
+                if df_final_temp.empty:
+                    st.error("❌ Erro ao processar correção monetária.")
+                    return
 
-                # Preparar DataFrame de índices
-                df_indices = st.session_state.df_indices_economicos.copy()
-                df_indices['data'] = pd.to_datetime(df_indices['data'])
-                df_indices = df_indices.sort_values('data')
-                
-                # Criar índices com mês anterior para cálculo da taxa mensal
-                df_indices['data_mes_anterior'] = df_indices['data'].shift(1)
-                df_indices['indice_mes_anterior'] = df_indices['indice'].shift(1)
-                
-                # Calcular taxa mensal = indice_atual - indice_anterior (diferença simples)
-                df_indices['taxa_mensal'] = 1 - df_indices['indice_mes_anterior'] / df_indices['indice']
-                df_indices['taxa_diaria'] = (df_indices['taxa_mensal'] + 1) ** (1/30) - 1
-
-                # Preparar DataFrame principal
-                df_final_temp = df_final_temp.copy()
-                df_final_temp['data_vencimento_limpa'] = pd.to_datetime(df_final_temp['data_vencimento_limpa'], errors='coerce')
-                df_final_temp['data_base'] = pd.to_datetime(df_final_temp['data_base'], errors='coerce')
-
-                progress_main.progress(0.52)
-                
-                # ==== MERGE 1: DATA BASE (ULTRA-OTIMIZADO) ====
+                # ==== APLICAR CORREÇÃO MONETÁRIA FINAL (VETORIZADA) ====
                 with log_container:
-                    st.info("🔄 **Merge 1/2:** Índices da data base (O(log n))...")
-                
-                # Criar coluna auxiliar para merge (ano-mês)
-                df_indices['ano_mes'] = df_indices['data'].dt.to_period('M')
-                df_final_temp['ano_mes_base'] = df_final_temp['data_base'].dt.to_period('M')
-                df_final_temp['ano_mes_venc'] = df_final_temp['data_vencimento_limpa'].dt.to_period('M')
-                
-                # Merge com data base
-                df_merged_base = df_final_temp.merge(
-                    df_indices[['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal','taxa_diaria']].rename(columns={
-                        'ano_mes': 'ano_mes_base',
-                        'indice': 'indice_mes_base',
-                        'indice_mes_anterior': 'indice_mes_anterior_base',
-                        'taxa_mensal': 'taxa_mensal_base',
-                        'taxa_diaria': 'taxa_diaria_base'
-                    }),
-                    on='ano_mes_base',
-                    how='left'
-                )
-                
-                progress_main.progress(0.54)
-                
-                # ==== MERGE 2: DATA VENCIMENTO (ULTRA-OTIMIZADO) ====
-                with log_container:
-                    st.info("🔄 **Merge 2/2:** Índices da data vencimento (O(log n))...")
+                    st.info("💰 **Calculando correção monetária** vetorizada...")
                     
-                df_merged_completo = df_merged_base.merge(
-                    df_indices[['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal','taxa_diaria']].rename(columns={
-                        'ano_mes': 'ano_mes_venc',
-                        'indice': 'indice_mes_venc',
-                        'indice_mes_anterior': 'indice_mes_anterior_venc',
-                        'taxa_mensal': 'taxa_mensal_venc',
-                        'taxa_diaria': 'taxa_diaria_venc'
-                    }),
-                    on='ano_mes_venc',
-                    how='left'
-                )
-                
-                progress_main.progress(0.56)
-                
-                # ==== CÁLCULO DOS ÍNDICES DIÁRIOS (VETORIZADO) ====
-                with log_container:
-                    st.info("🧮 **Cálculo vetorizado** de índices diários...")
-                
-                # Função para calcular índice na data específica
-                def calcular_indice_diario(row, tipo='base'):
-                    if tipo == 'base':
-                        data = row['data_base']
-                        indice_mes = row['indice_mes_base']
-                        indice_mes_anterior = row['indice_mes_anterior_base']
-                        taxa_mensal = row['taxa_mensal_base']
-                        taxa_diaria = row['taxa_diaria_base']
-                        data_fechamento = row['data_base']
-                    else:  # vencimento
-                        data = row['data_vencimento_limpa']
-                        indice_mes = row['indice_mes_venc']
-                        indice_mes_anterior = row['indice_mes_anterior_venc']
-                        taxa_mensal = row['taxa_mensal_venc']
-                        taxa_diaria = row['taxa_diaria_venc']
-                        data_fechamento = row['data_vencimento_limpa']
-                    
-                    if pd.isna(data) or pd.isna(indice_mes) or pd.isna(taxa_mensal):
-                        return indice_mes if not pd.isna(indice_mes) else np.nan
-                    
-                    # Se a data é o último dia do mês de data_fechamento, usar índice direto
-                    ultimo_dia_mes = (data_fechamento + pd.offsets.MonthEnd(0)).day
-                    if data.day == ultimo_dia_mes:
-                        return indice_mes
-                    
-                    # Calcular dias do período
-                    dias_periodo = data.day
-                    
-                    # Taxa do período
-                    taxa_periodo = ((1 + taxa_diaria) ** (dias_periodo) - 1)
-
-                    # Índice na data
-                    indice_na_data = (indice_mes_anterior * taxa_periodo) + indice_mes_anterior 
-
-                    return indice_na_data
-                
-                # Aplicar cálculo vetorizado
-                with log_container:
-                    st.info("🔄 **Aplicando** índices data base...")
-                df_merged_completo['indice_base_diario'] = df_merged_completo.apply(
-                    lambda row: calcular_indice_diario(row, 'base'), axis=1
-                )
-                
-                progress_main.progress(0.58)
-                
-                with log_container:
-                    st.info("🔄 **Aplicando** índices data vencimento...")
-                df_merged_completo['indice_venc_diario'] = df_merged_completo.apply(
-                    lambda row: calcular_indice_diario(row, 'vencimento'), axis=1
-                )
-                
-                # ==== CÁLCULO DO FATOR DE CORREÇÃO (ULTRA-RÁPIDO) ====
-                # Mask para registros válidos
-                mask_validos = (
-                    df_merged_completo['indice_base_diario'].notna()
-                    & df_merged_completo['indice_venc_diario'].notna()
-                    & (df_merged_completo['indice_base_diario'] > 0)
-                    & (df_merged_completo['indice_venc_diario'] > 0)
-                )
-                
-                # Fator de correção = indice_vencimento / indice_base
-                df_merged_completo['fator_correcao'] = 1.0  # Default
-                df_merged_completo.loc[mask_validos, 'fator_correcao'] = (
-                    df_merged_completo.loc[mask_validos, 'indice_base_diario'] /
-                    df_merged_completo.loc[mask_validos, 'indice_venc_diario']
-                )
-                
-                # ==== APLICAR CORREÇÃO MONETÁRIA (VETORIZADA) ====
-                df_merged_completo['correcao_monetaria'] = np.maximum(
-                    df_merged_completo['valor_liquido'] *
-                    (df_merged_completo['fator_correcao'] - 1),
+                df_final_temp['correcao_monetaria'] = np.maximum(
+                    df_final_temp['valor_liquido'] *
+                    (df_final_temp['fator_correcao'] - 1),
                     0
                 )
 
-                df_merged_completo['valor_corrigido'] = (
-                    df_merged_completo['valor_liquido'] +
-                    df_merged_completo['multa'] +
-                    df_merged_completo['juros_moratorios'] +
-                    df_merged_completo['correcao_monetaria']
+                df_final_temp['valor_corrigido'] = (
+                    df_final_temp['valor_liquido'] +
+                    df_final_temp['multa'] +
+                    df_final_temp['juros_moratorios'] +
+                    df_final_temp['correcao_monetaria']
                 )
 
-                if 'taxa_recuperacao' in df_merged_completo.columns:
-                    df_merged_completo['valor_recuperavel_ate_data_base'] = (
-                        df_merged_completo['valor_corrigido'] *
-                        df_merged_completo['taxa_recuperacao']
+                df_final_temp['valor_recuperavel_ate_data_base'] = (
+                        df_final_temp['valor_corrigido'] *
+                        df_final_temp['taxa_recuperacao']
                     )
 
-                # Atualizar colunas finais
-                df_merged_completo.loc[mask_validos, 'indice_vencimento'] = df_merged_completo.loc[mask_validos, 'indice_venc_diario']
-                df_merged_completo.loc[mask_validos, 'indice_base'] = df_merged_completo.loc[mask_validos, 'indice_base_diario']
+                # Renomear fator_correcao para fator_correcao_ate_data_base
+                df_final_temp.rename(columns={'fator_correcao': 'fator_correcao_ate_data_base'}, inplace=True)
 
-                registros_customizados = mask_validos.sum()
-                total_registros = len(df_merged_completo)
-                percentual = (registros_customizados / total_registros) * 100
-
-                # Limpar colunas auxiliares
-                colunas_temp = [
-                    'ano_mes_base', 'ano_mes_venc', 'indice_mes_base', 'indice_mes_venc',
-                    'taxa_mensal_base', 'taxa_mensal_venc', 'data_fechamento_base', 'data_fechamento_venc',
-                    'indice_base_diario', 'indice_venc_diario', 'indice_mes_anterior_base', 'taxa_diaria_base', 'indice_mes_anterior_venc', 'taxa_diaria_venc'
-                ]
-                df_final_temp = df_merged_completo.drop(columns=[col for col in colunas_temp if col in df_merged_completo.columns])
+                progress_main.progress(0.75)
                 
                 etapa_tempo = time.time() - etapa_inicio
-                velocidade_indices = registros_customizados / etapa_tempo if etapa_tempo > 0 else 0
+                velocidade_correcao_final = len(df_final_temp) / etapa_tempo if etapa_tempo > 0 else 0
                 
                 with log_container:
-                    st.success(f"✅ **Índices customizados aplicados:** {registros_customizados:,}/{total_registros:,} registros ({percentual:.1f}%) em {etapa_tempo:.2f}s ({velocidade_indices:,.0f} reg/s)")
+                    st.success(f"✅ **Correção monetária final:** {len(df_final_temp):,} registros em {etapa_tempo:.2f}s ({velocidade_correcao_final:,.0f} reg/s)")
+
+                st.dataframe(df_final_temp)
+
+                # return
+                # ========== ETAPA 5: CÁLCULO DO VALOR JUSTO PARA DISTRIBUIDORAS ==========
+                # APENAS para distribuidoras padrão (não-VOLTZ)
+                status_text.text("⚖️ Etapa 5/5: Calculando valor justo para distribuidoras...")
+                progress_main.progress(0.8)
                 
-            else:
+                etapa_inicio = time.time()
+                
                 with log_container:
-                    st.info("ℹ️ **Usando correção padrão** do sistema (IGPM/IPCA automático)")
+                    st.info("⚖️ **Iniciando cálculo de valor justo** para distribuidoras padrão...")
 
-            
-            # ========== ETAPA 4: CÁLCULO DE CORREÇÃO MONETÁRIA FINAL (80%) ==========
-            status_text.text("� Etapa 4/5: Calculando correção monetária final...")
-            progress_main.progress(0.7)
-            
-            etapa_inicio = time.time()
-            
-            if df_final_temp.empty:
-                st.error("❌ Erro ao processar correção monetária.")
-                return
-
-            # ==== APLICAR CORREÇÃO MONETÁRIA FINAL (VETORIZADA) ====
-            with log_container:
-                st.info("💰 **Calculando correção monetária** vetorizada...")
-                
-            df_final_temp['correcao_monetaria'] = np.maximum(
-                df_final_temp['valor_liquido'] *
-                (df_final_temp['fator_correcao'] - 1),
-                0
-            )
-
-            df_final_temp['valor_corrigido'] = (
-                df_final_temp['valor_liquido'] +
-                df_final_temp['multa'] +
-                df_final_temp['juros_moratorios'] +
-                df_final_temp['correcao_monetaria']
-            )
-
-            df_final_temp['valor_recuperavel_ate_data_base'] = (
-                    df_final_temp['valor_corrigido'] *
-                    df_final_temp['taxa_recuperacao']
-                )
-
-            # Renomear fator_correcao para fator_correcao_ate_data_base
-            df_final_temp.rename(columns={'fator_correcao': 'fator_correcao_ate_data_base'}, inplace=True)
-
-            progress_main.progress(0.75)
-            
-            etapa_tempo = time.time() - etapa_inicio
-            velocidade_correcao_final = len(df_final_temp) / etapa_tempo if etapa_tempo > 0 else 0
-            
-            with log_container:
-                st.success(f"✅ **Correção monetária final:** {len(df_final_temp):,} registros em {etapa_tempo:.2f}s ({velocidade_correcao_final:,.0f} reg/s)")
-
-            # ========== ETAPA 5: CÁLCULO DO VALOR JUSTO (100%) ==========
-            status_text.text("⚖️ Etapa 5/5: Calculando valor justo com DI-PRE & IPCA...")
-            progress_main.progress(0.8)
-            
-            etapa_inicio = time.time()
-            
-            with log_container:
-                st.info("⚖️ **Iniciando cálculo** de valor justo...")
-
-            try:
-                # Verificar se temos dados DI-PRE disponíveis
-                if st.session_state.df_di_pre.empty:
-                    with log_container:
-                        st.warning("⚠️ Dados DI-PRE não disponíveis. Usando taxa padrão.")
-                    taxa_di_pre_6m = 0.10  # 10% ao ano como fallback
-                else:
-                    # Buscar taxa DI-PRE para 6 meses (prazo padrão de recebimento)
-                    linha_6m = st.session_state.df_di_pre[st.session_state.df_di_pre['meses_futuros'] == 6]
-                    if not linha_6m.empty:
-                        taxa_di_pre_6m = linha_6m.iloc[0]['252'] / 100  # Converter de % para decimal
-                    else:
-                        with log_container:
-                            st.warning("⚠️ Taxa DI-PRE para 6 meses não encontrada. Usando valor médio.")
-                        taxa_di_pre_6m = st.session_state.df_di_pre['252'].mean() / 100
-                
-                progress_main.progress(0.82)
-                
-                # ============= PREPARAR DADOS BASE (ULTRA-RÁPIDO) =============
-                # Garantir que data_base seja datetime
-                if 'data_base' not in df_final_temp.columns:
-                    df_final_temp['data_base'] = datetime.now()
-                df_final_temp['data_base'] = pd.to_datetime(df_final_temp['data_base'], errors='coerce')
-                
-                # Usar prazo_recebimento da taxa de recuperação se disponível, senão 6 meses
-                if 'prazo_recebimento' not in df_final_temp.columns:
-                    df_final_temp['prazo_recebimento'] = 6  # Padrão: 6 meses
-                
-                # ============= CÁLCULO DA TAXA DI-PRE ANUALIZADA (VETORIZADO) =============
-                df_final_temp['di_pre_taxa_anual'] = taxa_di_pre_6m
-                
-                # Aplicar spread de risco de 2.5% sobre a taxa DI-PRE
-                spread_risco = 2.5  # 2.5%
-                df_final_temp['taxa_di_pre_total_anual'] = (1 + df_final_temp['di_pre_taxa_anual']) * (1 + spread_risco / 100) - 1
-
-                # Converter taxa anual para mensal: (1 + taxa_anual)^(1/12) - 1
-                df_final_temp['taxa_desconto_mensal'] = (1 + df_final_temp['taxa_di_pre_total_anual']) ** (1/12) - 1
-
-                progress_main.progress(0.85)
-                
-                # ============= CÁLCULO DO PERÍODO ATÉ RECEBIMENTO (MERGE OTIMIZADO) =============
-                with log_container:
-                    st.info("📊 **Merge dinâmico** de prazos de recebimento...")
-                
-                # Usar dados da taxa de recuperação que já estão carregados no session_state
                 try:
-                    # Verificar se temos dados de taxa de recuperação carregados
-                    if 'df_taxa_recuperacao' in st.session_state and not st.session_state.df_taxa_recuperacao.empty:
-                        df_taxa = st.session_state.df_taxa_recuperacao.copy()
-                        
-                        # Fazer merge para pegar o prazo_recebimento baseado em empresa, tipo e aging
-                        df_final_temp = df_final_temp.merge(
-                            df_taxa[['Empresa', 'Tipo', 'Aging', 'Prazo de recebimento']],
-                            left_on=['empresa', 'tipo', 'aging_taxa'],
-                            right_on=['Empresa', 'Tipo', 'Aging'],
-                            how='left'
-                        )
-                        
-                        # Usar prazo_recebimento do merge, com fallback para valor padrão
-                        df_final_temp['meses_ate_recebimento'] = df_final_temp['Prazo de recebimento'].fillna(6).astype(int)
-                        
-                        # Limpar colunas auxiliares do merge
-                        colunas_merge = ['Empresa', 'Tipo', 'Aging', 'Prazo de recebimento']
-                        df_final_temp = df_final_temp.drop(columns=[col for col in colunas_merge if col in df_final_temp.columns])
-                        
-                        # Mostrar estatísticas do mapeamento
-                        contagem_meses = df_final_temp['meses_ate_recebimento'].value_counts().sort_index()
-                        
-                        with log_container:
-                            st.success(f"✅ **Meses de recebimento** obtidos dinamicamente!")
-                        
-                        # Mostrar distribuição em um formato mais compacto
-                        distribuicao_str = ", ".join([f"{meses}m: {count:,}" for meses, count in contagem_meses.items()])
-                        with log_container:
-                            st.info(f"📊 **Distribuição:** {distribuicao_str}")
-                    else:
-                        raise Exception("Dados de taxa de recuperação não encontrados no session_state")
-                            
-                except Exception as e:
-                    with log_container:
-                        st.warning(f"⚠️ Erro ao usar dados da taxa de recuperação: {str(e)}")
-                        st.info("📊 Usando valores padrão para meses de recebimento...")
+                    # ========== USAR MÓDULO ESPECÍFICO PARA DISTRIBUIDORAS ==========
+                    calc_valor_justo_dist = CalculadorValorJustoDistribuidoras(st.session_state.params)
                     
-                    # Fallback para valores padrão baseados no aging_taxa
-                    def calcular_meses_fallback(row):
-                        aging_taxa = str(row.get('aging_taxa', 'Geral')).strip().lower()
-                        if 'vencer' in aging_taxa:
-                            return 6
-                        elif 'primeiro' in aging_taxa:
-                            return 6  # Baseado no exemplo: todos têm 6 meses
-                        elif 'segundo' in aging_taxa:
-                            return 6
-                        elif 'terceiro' in aging_taxa:
-                            return 6
-                        elif 'quarto' in aging_taxa:
-                            return 6
-                        elif 'quinto' in aging_taxa:
-                            return 6
-                        elif 'demais' in aging_taxa:
-                            return 6
-                        else:
-                            return 6  # Default baseado no template
-                    
-                    df_final_temp['meses_ate_recebimento'] = df_final_temp.apply(calcular_meses_fallback, axis=1)
-                    
-                    # Data estimada de recebimento (data_base + meses_ate_recebimento)
-                    def calcular_data_recebimento(row):
-                        try:
-                            data_base = row.get('data_base', datetime.now())
-                            meses = row.get('meses_ate_recebimento', 30)
-                            return pd.to_datetime(data_base) + pd.DateOffset(months=int(meses))
-                        except:
-                            return datetime.now() + pd.DateOffset(months=30)
-                    
-                    df_final_temp['data_recebimento_estimada'] = df_final_temp.apply(calcular_data_recebimento, axis=1)
-
-                    # ============= ETAPA 3.1: CÁLCULO DO IPCA MENSAL REAL DOS DADOS DO EXCEL =============
-                    st.info("📊 Calculando IPCA mensal real baseado nos índices carregados...")
-                    
-                    # Buscar data atual e data de 12 meses atrás nos dados carregados
-                    data_hoje = datetime.now()
-                    data_12m_atras = data_hoje - pd.DateOffset(months=12)
-                    
-                    # Formatar datas para busca (YYYY.MM)
-                    data_hoje_formatada = data_hoje.strftime('%Y.%m')
-                    data_12m_formatada = data_12m_atras.strftime('%Y.%m')
-                    
-                    # Buscar índices correspondentes no DataFrame de índices
-                    df_indices = st.session_state.df_indices_economicos.copy()
-                    df_indices['data_formatada'] = df_indices['data'].dt.strftime('%Y.%m')
-                    
-                    # Buscar índice atual (mais próximo da data de hoje)
-                    indice_atual = None
-                    indice_12m = None
-                    
-                    # Tentar encontrar índice exato, senão buscar o mais próximo
-                    filtro_atual = df_indices[df_indices['data_formatada'] == data_hoje_formatada]
-                    if not filtro_atual.empty:
-                        indice_atual = filtro_atual.iloc[0]['indice']
-                    else:
-                        # Buscar o mais recente disponível
-                        df_indices_ordenado = df_indices.sort_values('data', ascending=False)
-                        indice_atual = df_indices_ordenado.iloc[0]['indice']
-                        st.info(f"📅 Usando índice mais recente disponível: {df_indices_ordenado.iloc[0]['data'].strftime('%Y-%m')}")
-                    
-                    # Buscar índice de 12 meses atrás
-                    filtro_12m = df_indices[df_indices['data_formatada'] == data_12m_formatada]
-                    if not filtro_12m.empty:
-                        indice_12m = filtro_12m.iloc[0]['indice']
-                    else:
-                        # Buscar o mais próximo de 12 meses atrás
-                        df_indices['diferenca_12m'] = abs((df_indices['data'] - data_12m_atras).dt.days)
-                        indice_mais_proximo_12m = df_indices.loc[df_indices['diferenca_12m'].idxmin()]
-                        indice_12m = indice_mais_proximo_12m['indice']
-                        st.info(f"📅 Usando índice mais próximo de 12m atrás: {indice_mais_proximo_12m['data'].strftime('%Y-%m')}")
-                    
-                    # Calcular IPCA anual e mensal
-                    if indice_atual and indice_12m and indice_12m > 0:
-                        # IPCA anual = (índice_atual / índice_12m_atrás) - 1
-                        ipca_anual = (indice_atual / indice_12m) - 1
-                        
-                        # IPCA mensal = (1 + ipca_anual)^(1/12) - 1
-                        ipca_mensal_calculado = ((1 + ipca_anual) ** (1/12)) - 1
-                        
-                        # Aplicar o IPCA mensal calculado para todos os registros
-                        df_final_temp['ipca_mensal'] = ipca_mensal_calculado
-                        
-                        st.success(f"""
-                        ✅ **IPCA mensal calculado com dados reais do Excel!**
-                        📊 Índice Atual: {indice_atual:.2f}
-                        📊 Índice 12m Atrás: {indice_12m:.2f}
-                        📈 IPCA Anual: {ipca_anual*100:.2f}%
-                        � IPCA Mensal: {ipca_mensal_calculado*100:.4f}%
-                        """)
-                        
-                    else:
-                        # Fallback se não conseguir calcular
-                        df_final_temp['ipca_mensal'] = 0.0037  # 4.5% ao ano
-                        st.warning("⚠️ Não foi possível calcular IPCA dos dados. Usando taxa padrão de 4.5% a.a.")
-                    
-                    
-                    # Calcular o fator de correção com IPCA
-                    df_final_temp['fator_correcao_ate_recebimento'] = (1 + df_final_temp['ipca_mensal']) ** df_final_temp['meses_ate_recebimento']
-
-                    # ============= ETAPA 4: APLICAR TAXA DE DESCONTO =============
-                    # Fator de capitalização composta: (1 + taxa_mensal)^meses
-                    df_final_temp['fator_de_desconto'] = (1 + df_final_temp['taxa_desconto_mensal'] ) ** df_final_temp['meses_ate_recebimento']
-                    
-                    # ============= ETAPA 5: CÁLCULO DE MULTA POR ATRASO =============
-                    # Data atual para cálculo de atraso
-                    data_atual = datetime.now()
-                    
-                    # Calcular dias de atraso em relação à data de recebimento estimada
-                    df_final_temp['dias_atraso'] = (data_atual - df_final_temp['data_recebimento_estimada']).dt.days.clip(lower=0)
-                    
-                    # Multa por atraso: 1% ao mês = 0.01/30 por dia
-                    taxa_multa_diaria = 0.01 / 30
-                    df_final_temp['multa_atraso'] = df_final_temp['dias_atraso'] * taxa_multa_diaria
-                    
-                    # Aplicar multa mínima de 6% mesmo sem atraso (margem de segurança)
-                    multa_minima = 0.06
-                    df_final_temp['multa_final'] = df_final_temp['multa_atraso'].clip(lower=multa_minima)
-                    
-                    # ============= ETAPA 6: CÁLCULO FINAL DO VALOR JUSTO =============
-                    # Verificar se temos taxa_recuperacao
-                    if 'taxa_recuperacao' in df_final_temp.columns:
-                        # Fórmula completa: valor_corrigido × taxa_recuperacao × (fator_capitalização + multa)
-                        df_final_temp['valor_justo'] = (
-                            df_final_temp['valor_corrigido'] * 
-                            df_final_temp['taxa_recuperacao'] * 
-                            (df_final_temp['fator_correcao_ate_recebimento'] + df_final_temp['multa_final']) /
-                            df_final_temp['fator_de_desconto']
-                        )
-                    else:
-                        # Fallback sem taxa de recuperação
-                        df_final_temp['valor_justo'] = (
-                            df_final_temp['valor_corrigido'] * 
-                            (df_final_temp['fator_correcao_ate_recebimento'] + df_final_temp['multa_final']) /
-                            df_final_temp['fator_de_desconto']
-                        )
-
-                    # Calcular valor_recuperavel_ate_recebimento
-                    df_final_temp['valor_recuperavel_ate_recebimento'] = (
-                        df_final_temp['valor_recuperavel_ate_data_base'] * (df_final_temp['fator_correcao_ate_recebimento'] + df_final_temp['multa_final'])
+                    # Processar valor justo completo para distribuidoras
+                    df_final_temp = calc_valor_justo_dist.processar_valor_justo_distribuidoras(
+                        df_final_temp, 
+                        log_container, 
+                        progress_main
                     )
-
-                    # Remove a coluna 'valor_recuperavel' se existir
-                    if 'valor_recuperavel' in df_final_temp.columns:
-                        df_final_temp = df_final_temp.drop(columns=['valor_recuperavel'])
-
-                    # ============= ETAPA 6.5: CALCULAR VALOR JUSTO PARA VOLTZ =============
-                    if eh_voltz_detectado:
-                        with log_container:
-                            st.info("⚡ **VOLTZ detectada:** Calculando valor justo com DI-PRE...")
-                        
-                        # Aplicar valor justo específico para VOLTZ
-                        df_final_temp = calculador_voltz.calcular_valor_justo_voltz(
-                            df_final_temp, 
-                            st.session_state.df_di_pre,
-                            data_base=None,  # Usa data atual
-                            spread_risco=0.025  # 2.5% de spread
-                        )
-                        
-                        with log_container:
-                            st.success("✅ **Valor justo VOLTZ:** Aplicado com sucesso usando DI-PRE + spread")
-
                     # ============= ETAPA 7: CALCULAR VALOR JUSTO REAJUSTADO =============
                     # Aplicar descontos por aging sobre o valor justo
                     df_final_temp = calc_correcao.calcular_valor_justo_reajustado(df_final_temp)
@@ -1513,9 +1984,16 @@ def show():
                     
                     # Métricas finais
                     velocidade_total = len(df_final_temp) / tempo_total if tempo_total > 0 else 0
-                    metric_registros.metric("📊 Registros", f"{len(df_final_temp):,}", "✅ Processados")
-                    metric_velocidade.metric("⚡ Velocidade", f"{velocidade_total:,.0f}", "registros/seg")
-                    metric_tempo.metric("⏱️ Tempo Total", f"{tempo_total:.1f}s", "🎯 Ultra-rápido")
+                    
+                    # Criar colunas para métricas
+                    metric_col1, metric_col2, metric_col3 = st.columns(3)
+                    
+                    with metric_col1:
+                        st.metric("📊 Registros", f"{len(df_final_temp):,}", "✅ Processados")
+                    with metric_col2:
+                        st.metric("⚡ Velocidade", f"{velocidade_total:,.0f}", "registros/seg")
+                    with metric_col3:
+                        st.metric("⏱️ Tempo Total", f"{tempo_total:.1f}s", "🎯 Ultra-rápido")
                     
                     # Dashboard de performance final
                     with log_container:
@@ -1528,61 +2006,59 @@ def show():
                         # Verificar se temos otimizações VOLTZ
                         if eh_voltz_detectado:
                             st.success("🎯 **Sistema VOLTZ:** Otimizações ultra-avançadas aplicadas com sucesso!")
+                            
+                            # Performance score
+                            performance_score = min(100, (velocidade_total / 1000) * 100)  # Score baseado em throughput
+                            st.metric("🏆 Performance Score", f"{performance_score:.0f}/100", "Ultra-Performance")
                         
-                        # Performance score
-                        performance_score = min(100, (velocidade_total / 1000) * 100)  # Score baseado em throughput
-                        st.metric("🏆 Performance Score", f"{performance_score:.0f}/100", "Ultra-Performance")
-                    
-                    st.success("✅ Correção monetária e valor justo calculados com sucesso!")
-                    
-            except Exception as e:
-                st.error(f"❌ Erro no cálculo do valor justo: {str(e)}")
-                st.warning("⚠️ Continuando com dados básicos (sem valor justo)")
-                # Salvar dados básicos mesmo com erro no valor justo
-                st.session_state.df_final = df_final_temp
-                st.session_state.df_com_aging = df_com_aging
-                st.exception(e)  # Debug detalhado
+                        st.success("✅ Correção monetária e valor justo calculados com sucesso!")
+                        
+                except Exception as e:
+                    st.error(f"❌ Erro no cálculo do valor justo: {str(e)}")
+                    st.warning("⚠️ Continuando com dados básicos (sem valor justo)")
+                    # Salvar dados básicos mesmo com erro no valor justo
+                    st.session_state.df_final = df_final_temp
+                    st.session_state.df_com_aging = df_com_aging
+                    st.exception(e)  # Debug detalhado
                     
         except Exception as e:
             st.error(f"❌ Erro ao processar correção: {str(e)}")
             st.exception(e)  # Debug
 
+        st.dataframe(st.session_state.df_final)
+
     # Mostrar resultados APENAS se o cálculo foi solicitado pelo usuário E temos dados calculados
     calculo_foi_solicitado = st.session_state.get('calculo_solicitado', False)
     tem_dados_calculados = 'df_final' in st.session_state and not st.session_state.df_final.empty
     
-    # Adicionar informação quando tudo está pronto mas o cálculo não foi executado
-    if not calculo_foi_solicitado and tem_taxa_recuperacao:
-        st.info("💡 **Tudo pronto!** Clique no botão 'Calcular Correção Monetária' acima para executar os cálculos.")
-    
-    if calculo_foi_solicitado and tem_dados_calculados:
+    # if calculo_foi_solicitado and tem_dados_calculados:
         
-        # Detectar se é VOLTZ para escolher o visualizador apropriado
-        nome_arquivo_detectado = "Distribuidora"  # Default
-        if 'df_carregado' in st.session_state and st.session_state.df_carregado:
-            primeiro_arquivo = list(st.session_state.df_carregado.keys())[0]
-            nome_arquivo_detectado = primeiro_arquivo
+    #     # Detectar se é VOLTZ para escolher o visualizador apropriado
+    #     nome_arquivo_detectado = "Distribuidora"  # Default
+    #     if 'df_carregado' in st.session_state and st.session_state.df_carregado:
+    #         primeiro_arquivo = list(st.session_state.df_carregado.keys())[0]
+    #         nome_arquivo_detectado = primeiro_arquivo
         
-        # Verificar se é VOLTZ
-        from utils.calculador_voltz import CalculadorVoltz
-        calculador_voltz = CalculadorVoltz(st.session_state.params)
-        eh_voltz = calculador_voltz.identificar_voltz(nome_arquivo_detectado)
+    #     # Verificar se é VOLTZ
+    #     from utils.calculador_voltz import CalculadorVoltz
+    #     calculador_voltz = CalculadorVoltz(st.session_state.params)
+    #     eh_voltz = calculador_voltz.identificar_voltz(nome_arquivo_detectado)
         
-        # Usar o visualizador apropriado
-        if eh_voltz:
-            st.info("⚡ **VOLTZ detectada:** Usando visualização específica para VOLTZ")
-            visualizador = VisualizadorVoltz()
-            visualizador.exibir_resultados_voltz(st.session_state.df_final)
-            visualizador.exibir_exportacao_voltz(st.session_state.df_final)
-            visualizador.exibir_limpar_cache()
-            visualizador.exibir_gerenciamento_checkpoints()
-        else:
-            st.info("🏢 **Distribuidora Geral:** Usando visualização padrão com DI-PRE")
-            visualizador = VisualizadorDistribuidoras()
-            visualizador.exibir_resultados_distribuidoras(st.session_state.df_final)
-            visualizador.exibir_exportacao_distribuidoras(st.session_state.df_final)
-            visualizador.exibir_info_processo_distribuidoras()
-            visualizador.exibir_limpar_cache()
+    #     # Usar o visualizador apropriado
+    #     if eh_voltz:
+    #         st.info("⚡ **VOLTZ detectada:** Usando visualização específica para VOLTZ")
+    #         visualizador = VisualizadorVoltz()
+    #         visualizador.exibir_resultados_voltz(st.session_state.df_final)
+    #         visualizador.exibir_exportacao_voltz(st.session_state.df_final)
+    #         visualizador.exibir_limpar_cache()
+    #         visualizador.exibir_gerenciamento_checkpoints()
+    #     else:
+    #         st.info("🏢 **Distribuidora Geral:** Usando visualização padrão com DI-PRE")
+    #         visualizador = VisualizadorDistribuidoras()
+    #         visualizador.exibir_resultados_distribuidoras(st.session_state.df_final)
+    #         visualizador.exibir_exportacao_distribuidoras(st.session_state.df_final)
+    #         visualizador.exibir_info_processo_distribuidoras()
+    #         visualizador.exibir_limpar_cache()
 
 
 if __name__ == "__main__":
