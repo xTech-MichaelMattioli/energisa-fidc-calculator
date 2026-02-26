@@ -30,5 +30,9 @@ dist-ssr
 *.pdf
 *.ipynb
 /BASE_DADOS/
-
+/energisa-fidc-calculator-3dea91b96361e9417f75fa1974b8f5575d4675d3/
+/energisa-fidc-calculator-2281bd064982753fad82a1835f398d8eba35bfde/
+*teste*
+*test*
+*RESUMO*
 __pycache__
