@@ -114,11 +114,19 @@ class MapeadorCampos:
         tipo_distribuidora = self.identificar_tipo_distribuidora(nome_arquivo)
         
         # Campos padrão que precisamos mapear
-        campos_padrao = [
-            'nome_cliente', 'documento', 'contrato', 'classe', 'situacao',
-            'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip',
-            'data_vencimento', 'empresa', 'tipo', 'status'
-        ]
+        if tipo_distribuidora == "VOLTZ":
+            # Para VOLTZ: apenas campos essenciais (sem classe, situacao, tipo)
+            campos_padrao = [
+                'nome_cliente', 'documento', 'contrato',
+                'valor_principal', 'data_vencimento'
+            ]
+        else:
+            # Para outras distribuidoras: todos os campos
+            campos_padrao = [
+                'nome_cliente', 'documento', 'contrato', 'classe', 'situacao',
+                'valor_principal', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip',
+                'data_vencimento', 'empresa', 'tipo', 'status'
+            ]
         
         # Para VOLTZ, remover campos que são preenchidos automaticamente
         if tipo_distribuidora == "VOLTZ":
@@ -132,9 +140,7 @@ class MapeadorCampos:
                 st.write("✅ **valor_terceiro** → 0") 
                 st.write("✅ **valor_cip** → 0")
             
-            # Remover campos automáticos da lista de mapeamento manual
-            campos_automaticos = ['empresa', 'valor_nao_cedido', 'valor_terceiro', 'valor_cip']
-            campos_padrao = [campo for campo in campos_padrao if campo not in campos_automaticos]
+            # Campos automáticos já não estão na lista para VOLTZ
         
         mapeamento_final = {}
         
