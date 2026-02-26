@@ -110,6 +110,10 @@ export interface UploadedFile {
   rowCount: number;
   detectedDate?: string;
   isVoltz: boolean;
+  /** Remote path in Supabase Storage (temp bucket) */
+  storagePath?: string;
+  /** Upload status */
+  uploadStatus?: "pending" | "uploading" | "uploaded" | "error";
 }
 
 export interface FieldMapping {

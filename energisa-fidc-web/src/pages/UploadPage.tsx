@@ -1,11 +1,13 @@
 /**
  * Page 1: Upload (Carregamento)
  * Upload Excel files from distribuidoras with drag-and-drop.
+ * Files are parsed locally AND uploaded to Supabase Storage (temp/bases/).
  */
 import { useCallback, useState } from "react";
 import { useApp } from "@/context/AppContext";
-import { parseExcelFile } from "@/services";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { parseExcelFile, uploadFileToStorage } from "@/services";
+import { isSupabaseConfigured } from "@/lib/supabase";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { motion, AnimatePresence } from "framer-motion";
@@ -17,14 +19,30 @@ import {
   CheckCircle2,
   AlertCircle,
   Zap,
+  Cloud,
+  CloudOff,
+  Loader2,
 } from "lucide-react";
 import { formatNumber } from "@/lib/utils";
+import type { UploadedFile } from "@/types";
 
 export function UploadPage() {
   const { uploadedFiles, setUploadedFiles, setCurrentStep } = useApp();
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const supabaseReady = isSupabaseConfigured();
+
+  /** Upload a single file to Supabase Storage and return updated metadata */
+  const uploadToStorage = async (file: File, parsed: UploadedFile): Promise<UploadedFile> => {
+    if (!supabaseReady) return { ...parsed, uploadStatus: "pending" };
+    try {
+      const result = await uploadFileToStorage(file, "bases");
+      return { ...parsed, storagePath: result.path, uploadStatus: "uploaded" };
+    } catch {
+      return { ...parsed, uploadStatus: "error" };
+    }
+  };
 
   const handleFiles = useCallback(
     async (fileList: FileList | File[]) => {
@@ -41,15 +59,22 @@ export function UploadPage() {
       }
 
       try {
+        // Parse locally
         const parsed = await Promise.all(files.map(parseExcelFile));
-        setUploadedFiles([...uploadedFiles, ...parsed]);
+
+        // Upload to Supabase Storage in parallel
+        const withStorage = await Promise.all(
+          parsed.map((p, i) => uploadToStorage(files[i], p))
+        );
+
+        setUploadedFiles([...uploadedFiles, ...withStorage]);
       } catch (err) {
         setError(String(err));
       } finally {
         setIsLoading(false);
       }
     },
-    [uploadedFiles, setUploadedFiles]
+    [uploadedFiles, setUploadedFiles, supabaseReady]
   );
 
   const handleDrop = useCallback(
@@ -189,6 +214,24 @@ export function UploadPage() {
                       <CheckCircle2 className="w-3 h-3" />
                       Carregado
                     </Badge>
+                    {file.uploadStatus === "uploaded" && (
+                      <Badge variant="default" className="gap-1 bg-sky-100 text-sky-700 border-sky-200">
+                        <Cloud className="w-3 h-3" />
+                        Storage
+                      </Badge>
+                    )}
+                    {file.uploadStatus === "uploading" && (
+                      <Badge variant="default" className="gap-1 bg-amber-50 text-amber-600 border-amber-200">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Enviando…
+                      </Badge>
+                    )}
+                    {file.uploadStatus === "error" && (
+                      <Badge variant="destructive" className="gap-1">
+                        <CloudOff className="w-3 h-3" />
+                        Erro Storage
+                      </Badge>
+                    )}
                   </div>
                   <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground">
                     <span>{formatNumber(file.rowCount, 0)} registros</span>
@@ -218,14 +261,22 @@ export function UploadPage() {
           animate={{ opacity: 1 }}
           className="flex items-center justify-between pt-4"
         >
-          <p className="text-sm text-muted-foreground">
-            {uploadedFiles.length} arquivo(s) carregado(s) —{" "}
-            {formatNumber(
-              uploadedFiles.reduce((acc, f) => acc + f.rowCount, 0),
-              0
-            )}{" "}
-            registros totais
-          </p>
+          <div className="flex items-center gap-4">
+            <p className="text-sm text-muted-foreground">
+              {uploadedFiles.length} arquivo(s) carregado(s) —{" "}
+              {formatNumber(
+                uploadedFiles.reduce((acc, f) => acc + f.rowCount, 0),
+                0
+              )}{" "}
+              registros totais
+            </p>
+            {supabaseReady && (
+              <div className="flex items-center gap-1.5 text-xs text-sky-600">
+                <Cloud className="w-3.5 h-3.5" />
+                {uploadedFiles.filter((f) => f.uploadStatus === "uploaded").length}/{uploadedFiles.length} no Storage
+              </div>
+            )}
+          </div>
           <Button onClick={proceed} className="gap-2">
             Próximo: Mapeamento
             <ArrowRight className="w-4 h-4" />
