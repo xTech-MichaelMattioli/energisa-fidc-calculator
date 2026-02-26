@@ -1,20 +1,16 @@
 /**
  * Service: Edge Function Client
- * Wraps calls to Supabase Edge Functions (validate-excel, extract-columns).
+ * Wraps calls to Supabase Edge Functions.
+ *
+ * Primary function:
+ *   read-columns  →  download + validate header + extract column metadata (single shot)
+ *
+ * Legacy functions kept for reference:
+ *   validate-excel, extract-columns (now superseded by read-columns)
  */
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
 // ─── Response Types ───────────────────────────────────────────────
-
-export interface ValidateExcelResult {
-  valid: boolean;
-  columns: string[];
-  rowCount: number;
-  sheetName: string;
-  sampleData: Record<string, unknown>[];
-  isVoltz: boolean;
-  error?: string;
-}
 
 export type DetectedColumnType = "string" | "number" | "date" | "empty" | "mixed";
 
@@ -27,6 +23,33 @@ export interface ColumnInfo {
   uniqueCount: number;
 }
 
+/**
+ * Unified result from the `read-columns` edge function.
+ * Covers both header validation and column extraction in one call.
+ */
+export interface ReadColumnsResult {
+  valid: boolean;
+  error?: string;
+  // populated when valid = true
+  columns?: string[];
+  columnInfo?: ColumnInfo[];
+  rowCount?: number;
+  sheetName?: string;
+  isVoltz?: boolean;
+  sampleData?: Record<string, unknown>[];
+}
+
+// ── Legacy types kept for backward compatibility ──────────────────
+export interface ValidateExcelResult {
+  valid: boolean;
+  columns: string[];
+  rowCount: number;
+  sheetName: string;
+  sampleData: Record<string, unknown>[];
+  isVoltz: boolean;
+  error?: string;
+}
+
 export interface ExtractColumnsResult {
   success: boolean;
   columns: ColumnInfo[];
@@ -36,62 +59,77 @@ export interface ExtractColumnsResult {
   error?: string;
 }
 
-// ─── Edge Function Calls ──────────────────────────────────────────
+// ─── Primary Function ─────────────────────────────────────────────
 
 /**
- * Call the `validate-excel` Edge Function.
- * Validates that the first row of the uploaded Excel is a proper header.
- * Returns column names, row count, sample data, and VOLTZ detection.
+ * Call the `read-columns` Edge Function.
+ *
+ * Single HTTP round-trip:
+ *   download file → validate header → extract column metadata → return all
+ *
+ * On error the returned object has `valid: false` and an `error` message
+ * instead of throwing, so callers can inspect the reason.
  */
+export async function callReadColumns(
+  storagePath: string,
+  fileName: string
+): Promise<ReadColumnsResult> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return { valid: false, error: "Supabase não configurado" };
+  }
+
+  // invoke() resolves even for non-2xx — error is set by the JS client only
+  // for network/fetch failures, not for application-level errors returned by
+  // the function. So we read data regardless.
+  const { data, error } = await supabase.functions.invoke("read-columns", {
+    body: { storagePath, fileName },
+  });
+
+  if (error) {
+    // Network or invocation-level failure
+    return { valid: false, error: `Falha ao chamar edge function: ${error.message}` };
+  }
+
+  // data is the JSON body returned by the function (could be valid:false)
+  return (data ?? { valid: false, error: "Resposta vazia da edge function" }) as ReadColumnsResult;
+}
+
+// ─── Legacy Functions (kept for backward compatibility) ───────────
+
+/** @deprecated Use callReadColumns instead */
 export async function callValidateExcel(
   storagePath: string,
   fileName: string
 ): Promise<ValidateExcelResult> {
-  if (!isSupabaseConfigured() || !supabase) {
-    throw new Error("Supabase não configurado");
-  }
-
-  const { data, error } = await supabase.functions.invoke("validate-excel", {
-    body: { storagePath, fileName },
-  });
-
-  if (error) {
-    throw new Error(`Erro na validação: ${error.message}`);
-  }
-
-  return data as ValidateExcelResult;
+  const r = await callReadColumns(storagePath, fileName);
+  return {
+    valid: r.valid,
+    columns: r.columns ?? [],
+    rowCount: r.rowCount ?? 0,
+    sheetName: r.sheetName ?? "",
+    sampleData: r.sampleData ?? [],
+    isVoltz: r.isVoltz ?? false,
+    error: r.error,
+  };
 }
 
-/**
- * Call the `extract-columns` Edge Function.
- * Performs deeper column analysis: type detection, sample values, stats.
- * This feeds into the field-mapper service for smarter auto-mapping.
- */
+/** @deprecated Use callReadColumns instead */
 export async function callExtractColumns(
   storagePath: string,
   fileName: string
 ): Promise<ExtractColumnsResult> {
-  if (!isSupabaseConfigured() || !supabase) {
-    throw new Error("Supabase não configurado");
-  }
-
-  const { data, error } = await supabase.functions.invoke("extract-columns", {
-    body: { storagePath, fileName },
-  });
-
-  if (error) {
-    throw new Error(`Erro na extração de colunas: ${error.message}`);
-  }
-
-  return data as ExtractColumnsResult;
+  const r = await callReadColumns(storagePath, fileName);
+  return {
+    success: r.valid,
+    columns: r.columnInfo ?? [],
+    totalRows: r.rowCount ?? 0,
+    sheetName: r.sheetName ?? "",
+    isVoltz: r.isVoltz ?? false,
+    error: r.error,
+  };
 }
 
-/**
- * Full validation + extraction pipeline.
- * 1. Upload completed → validate header
- * 2. If valid → extract detailed column info
- * Returns both results.
- */
+/** @deprecated Use callReadColumns instead */
 export async function validateAndExtractColumns(
   storagePath: string,
   fileName: string
@@ -99,15 +137,26 @@ export async function validateAndExtractColumns(
   validation: ValidateExcelResult;
   extraction: ExtractColumnsResult | null;
 }> {
-  // Step 1: Validate
-  const validation = await callValidateExcel(storagePath, fileName);
-
-  if (!validation.valid) {
-    return { validation, extraction: null };
-  }
-
-  // Step 2: Extract detailed column info
-  const extraction = await callExtractColumns(storagePath, fileName);
-
-  return { validation, extraction };
+  const r = await callReadColumns(storagePath, fileName);
+  const validation: ValidateExcelResult = {
+    valid: r.valid,
+    columns: r.columns ?? [],
+    rowCount: r.rowCount ?? 0,
+    sheetName: r.sheetName ?? "",
+    sampleData: r.sampleData ?? [],
+    isVoltz: r.isVoltz ?? false,
+    error: r.error,
+  };
+  if (!r.valid) return { validation, extraction: null };
+  return {
+    validation,
+    extraction: {
+      success: true,
+      columns: r.columnInfo ?? [],
+      totalRows: r.rowCount ?? 0,
+      sheetName: r.sheetName ?? "",
+      isVoltz: r.isVoltz ?? false,
+    },
+  };
 }
+

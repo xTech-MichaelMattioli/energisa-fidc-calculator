@@ -8,5 +8,5 @@ export type { PipelineInput, ProgressCallback } from "./pipeline.service";
 export type { CorrectionParams } from "./correction-calculator.service";
 export { uploadFileToStorage, uploadFilesToStorage, listSessionFiles, deleteFileFromStorage, clearSessionFolder, getSignedUrl } from "./storage.service";
 export type { StorageFolder, StorageUploadResult } from "./storage.service";
-export { callValidateExcel, callExtractColumns, validateAndExtractColumns } from "./edge-functions.service";
-export type { ValidateExcelResult, ExtractColumnsResult, ColumnInfo, DetectedColumnType } from "./edge-functions.service";
+export { callValidateExcel, callExtractColumns, validateAndExtractColumns, callReadColumns } from "./edge-functions.service";
+export type { ValidateExcelResult, ExtractColumnsResult, ColumnInfo, DetectedColumnType, ReadColumnsResult } from "./edge-functions.service";

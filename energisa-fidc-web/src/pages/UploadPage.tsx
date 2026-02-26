@@ -16,7 +16,7 @@ import { useApp } from "@/context/AppContext";
 import {
   parseExcelFile,
   uploadFileToStorage,
-  validateAndExtractColumns,
+  callReadColumns,
   deleteFileFromStorage,
 } from "@/services";
 import { isSupabaseConfigured } from "@/lib/supabase";
@@ -77,41 +77,36 @@ export function UploadPage() {
       return { ...result, uploadStatus: "error" };
     }
 
-    // ── Step 2+3: Validate header + Extract columns (edge functions) ──
+    // ── Step 2: Read columns (single edge function: validate + extract) ──
     try {
       result = { ...result, validationStatus: "validating" };
-      const { validation, extraction } = await validateAndExtractColumns(
-        result.storagePath!,
-        file.name
-      );
+      const r = await callReadColumns(result.storagePath!, file.name);
 
-      if (!validation.valid) {
-        // Invalid header → reject file, remove from Storage
+      if (!r.valid) {
+        // Invalid header or parse error → reject, remove from Storage
         await deleteFileFromStorage(result.storagePath!).catch(() => {});
         return {
           ...result,
           validationStatus: "invalid",
-          validationError: validation.error ?? "Cabeçalho inválido — a primeira linha não contém nomes de colunas válidos.",
+          validationError:
+            r.error ?? "Cabeçalho inválido — a primeira linha não contém nomes de colunas válidos.",
           uploadStatus: "error",
         };
       }
 
-      // Validation passed → use server-side columns (authoritative)
+      // Success — use server-side data (authoritative)
       result = {
         ...result,
         validationStatus: "valid",
-        columns: validation.columns,
-        rowCount: validation.rowCount,
-        sheetName: validation.sheetName,
-        isVoltz: validation.isVoltz || result.isVoltz,
+        columns: r.columns ?? result.columns,
+        columnInfo: r.columnInfo,
+        rowCount: r.rowCount ?? result.rowCount,
+        sheetName: r.sheetName,
+        isVoltz: r.isVoltz || result.isVoltz,
       };
-
-      // Extraction results (detailed column metadata)
-      if (extraction?.success) {
-        result = { ...result, columnInfo: extraction.columns };
-      }
-    } catch {
-      // Edge function down → keep local data, allow proceeding
+    } catch (e) {
+      // Edge function unreachable → keep local parse data, allow proceeding
+      console.warn("read-columns edge function failed:", e);
       result = { ...result, validationStatus: "error" };
     }
 
