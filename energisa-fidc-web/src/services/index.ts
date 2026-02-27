@@ -1,4 +1,5 @@
 export { parseExcelFile, parseIndicesExcel, parseRecoveryRatesExcel, parseDIPreFile, exportToCSV } from "./file-parser.service";
+export { parseExcelFileAsync } from "./excel-worker.service";
 export { autoMapFields, applyMapping, getMissingRequiredFields, getMappingConfidence, TARGET_FIELDS } from "./field-mapper.service";
 export { processAging, classifyAging, AGING_ORDER } from "./aging-calculator.service";
 export { calculateCorrection, calculateCorrectionVoltz } from "./correction-calculator.service";
@@ -6,7 +7,9 @@ export { calculateFairValue } from "./fair-value-calculator.service";
 export { runPipeline } from "./pipeline.service";
 export type { PipelineInput, ProgressCallback } from "./pipeline.service";
 export type { CorrectionParams } from "./correction-calculator.service";
-export { uploadFileToStorage, uploadFilesToStorage, listSessionFiles, deleteFileFromStorage, clearSessionFolder, getSignedUrl } from "./storage.service";
-export type { StorageFolder, StorageUploadResult } from "./storage.service";
+export { uploadFileToStorage, uploadFilesToStorage, uploadFileForValidation, listSessionFiles, listSessionStageFiles, moveToValidados, getCurrentSessionId, deleteFileFromStorage, clearSessionFolder, getSignedUrl } from "./storage.service";
+export type { StorageFolder, StorageStage, StorageUploadResult, StoredFileInfo, UploadProgressCallback } from "./storage.service";
 export { callValidateExcel, callExtractColumns, validateAndExtractColumns, callReadColumns } from "./edge-functions.service";
 export type { ValidateExcelResult, ExtractColumnsResult, ColumnInfo, DetectedColumnType, ReadColumnsResult } from "./edge-functions.service";
+export { validateFile, validateFiles } from "./validation-processor.service";
+export type { ValidationOutcome, ValidationStepCallback } from "./validation-processor.service";

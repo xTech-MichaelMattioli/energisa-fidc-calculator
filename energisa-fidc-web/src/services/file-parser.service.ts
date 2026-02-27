@@ -79,6 +79,7 @@ export async function parseExcelFile(file: File): Promise<UploadedFile> {
           return resolve({
             id: crypto.randomUUID(),
             name: file.name,
+            size: file.size,
             data: [],
             columns: [],
             rowCount: 0,
@@ -103,6 +104,7 @@ export async function parseExcelFile(file: File): Promise<UploadedFile> {
           return resolve({
             id: crypto.randomUUID(),
             name: file.name,
+            size: file.size,
             data: [],
             columns,
             rowCount: 0,
@@ -141,6 +143,7 @@ export async function parseExcelFile(file: File): Promise<UploadedFile> {
         resolve({
           id: crypto.randomUUID(),
           name: file.name,
+          size: file.size,
           data: jsonData,
           // Prefer keys from first data row; strip residual metadata columns
           columns:

@@ -102,25 +102,43 @@ export interface DIPRERate {
 
 // ─── Upload State ─────────────────────────────────────────────────
 
+/**
+ * Lifecycle of each file in the new "upload-first" flow:
+ *
+ *  uploading → uploaded → validating → valid | invalid
+ *                                        ↓
+ *                                    processing → processed
+ */
+export type FileUploadStatus = "uploading" | "converting" | "uploading_csv" | "uploaded" | "error";
+export type FileValidationStatus = "pending" | "validating" | "valid" | "invalid" | "error";
+export type FileProcessingStatus = "idle" | "processing" | "processed" | "error";
+
 export interface UploadedFile {
+  /** Client-side UUID */
   id: string;
+  /** Original file name */
   name: string;
-  data: RawRecord[];
+  /** File size in bytes */
+  size: number;
+
+  // ── Storage ──
+  /** Remote path in Supabase Storage (para_validacao/…) */
+  storagePath?: string;
+  /** Upload progress 0-100 */
+  uploadProgress?: number;
+  /** Upload status */
+  uploadStatus?: FileUploadStatus;
+
+  // ── Validation (from edge function) ──
+  validationStatus?: FileValidationStatus;
+  validationError?: string;
+
+  // ── Data (populated after edge function validates) ──
   columns: string[];
   rowCount: number;
   detectedDate?: string;
   isVoltz: boolean;
-  /** Remote path in Supabase Storage (temp bucket) */
-  storagePath?: string;
-  /** Upload status */
-  uploadStatus?: "pending" | "uploading" | "uploaded" | "error";
-  /** Header validation status (from edge function) */
-  validationStatus?: "pending" | "validating" | "valid" | "invalid" | "error";
-  /** Validation error message */
-  validationError?: string;
-  /** Sheet name from Excel */
   sheetName?: string;
-  /** Detailed column info from extract-columns edge function */
   columnInfo?: Array<{
     name: string;
     index: number;
@@ -129,6 +147,16 @@ export interface UploadedFile {
     nonEmptyCount: number;
     uniqueCount: number;
   }>;
+
+  // ── Processing (CSV conversion + temp table) ──
+  processingStatus?: FileProcessingStatus;
+  /** Path of the CSV in validados/ after processing */
+  csvPath?: string;
+  /** Supabase temp table name holding this file's data */
+  tempTable?: string;
+
+  // ── Legacy: raw data in memory (only for local-only mode) ──
+  data: RawRecord[];
 }
 
 export interface FieldMapping {
