@@ -1,14 +1,33 @@
 /**
  * Page 5: Results
- * Display summary metrics, data table, and export controls.
+ * Full calculation results with every intermediate column exposed for manual
+ * verification. Export to CSV with all columns, processing date, and
+ * "processado" filename suffix.
+ *
+ * Column groups (mirroring the calculation pipeline):
+ *   1. Dados Originais     – empresa, tipo, classe, contrato, VP, etc.
+ *   2. Aging               – dias_atraso, aging, aging_taxa
+ *   3. Correção Monetária  – VL, multa, juros_moratórios, fator_correção,
+ *                            correção_monetária, VC, juros_remuneratórios, SDV
+ *   4. Valor Justo         – taxa_recuperação, prazo, V.recuperável, VJ,
+ *                            desconto_aging, VJR
  */
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useApp } from "@/context/AppContext";
-import { exportToCSV } from "@/services";
+import {
+  exportToCSV,
+  getResults,
+  getAllResultsForExport,
+  getSummary,
+  getCurrentSessionId,
+} from "@/services";
+import type { FidcSummary, SessionDataRow } from "@/services";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { motion } from "framer-motion";
+import { Progress } from "@/components/ui/progress";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft,
   Download,
@@ -20,11 +39,173 @@ import {
   RefreshCw,
   ChevronLeft,
   ChevronRight,
+  Loader2,
+  Zap,
+  Calendar,
+  Table2,
+  CheckCircle2,
 } from "lucide-react";
 import { formatBRL, formatNumber } from "@/lib/utils";
 import type { FinalRecord } from "@/types";
 
-const PAGE_SIZE = 25;
+// ─── Column definitions for the full-detail table ─────────────────
+
+interface ColDef {
+  key: keyof SessionDataRow;
+  label: string;
+  group: "original" | "aging" | "correcao" | "vj";
+  align?: "left" | "right";
+  fmt?: (v: unknown) => string;
+}
+
+const fmtBRL = (v: unknown) =>
+  v != null && typeof v === "number"
+    ? v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+    : "R$ 0,00";
+
+const fmtPct = (v: unknown) =>
+  v != null && typeof v === "number" ? `${(v * 100).toFixed(2)}%` : "-";
+
+const fmtNum = (v: unknown) =>
+  v != null && typeof v === "number"
+    ? v.toLocaleString("pt-BR", { maximumFractionDigits: 6 })
+    : "-";
+
+const DB_COLUMNS: ColDef[] = [
+  // ── Dados Originais ──
+  { key: "row_number", label: "#", group: "original", align: "right" },
+  { key: "file_name", label: "Arquivo", group: "original" },
+  { key: "empresa", label: "Empresa", group: "original" },
+  { key: "tipo", label: "Tipo", group: "original" },
+  { key: "status_conta", label: "Status", group: "original" },
+  { key: "situacao", label: "Situação", group: "original" },
+  { key: "nome_cliente", label: "Cliente", group: "original" },
+  { key: "documento", label: "Documento", group: "original" },
+  { key: "classe", label: "Classe", group: "original" },
+  { key: "contrato", label: "Contrato", group: "original" },
+  { key: "valor_principal", label: "VP (R$)", group: "original", align: "right", fmt: fmtBRL },
+  { key: "valor_nao_cedido", label: "V.Não Cedido", group: "original", align: "right", fmt: fmtBRL },
+  { key: "valor_terceiro", label: "V.Terceiros", group: "original", align: "right", fmt: fmtBRL },
+  { key: "valor_cip", label: "V.CIP", group: "original", align: "right", fmt: fmtBRL },
+  { key: "data_vencimento", label: "Vencimento", group: "original" },
+  { key: "data_base", label: "Data Base", group: "original" },
+  { key: "base_origem", label: "Origem", group: "original" },
+  { key: "is_voltz", label: "VOLTZ?", group: "original", fmt: (v) => (v ? "Sim" : "Não") },
+  // ── Aging ──
+  { key: "dias_atraso", label: "Dias Atraso", group: "aging", align: "right", fmt: fmtNum },
+  { key: "aging", label: "Aging", group: "aging" },
+  { key: "aging_taxa", label: "Aging Taxa", group: "aging" },
+  // ── Correção Monetária ──
+  { key: "valor_liquido", label: "VL (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  { key: "multa", label: "Multa (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  { key: "juros_moratorios", label: "Juros Mora (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  { key: "fator_correcao", label: "Fator Correção", group: "correcao", align: "right", fmt: fmtNum },
+  { key: "correcao_monetaria", label: "Correção (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  { key: "valor_corrigido", label: "VC (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  { key: "juros_remuneratorios", label: "Juros Remun. (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  { key: "saldo_devedor_vencimento", label: "SDV (R$)", group: "correcao", align: "right", fmt: fmtBRL },
+  // ── Valor Justo ──
+  { key: "taxa_recuperacao", label: "Taxa Recup.", group: "vj", align: "right", fmt: fmtPct },
+  { key: "prazo_recebimento", label: "Prazo (meses)", group: "vj", align: "right", fmt: fmtNum },
+  { key: "valor_recuperavel", label: "V.Recuperável (R$)", group: "vj", align: "right", fmt: fmtBRL },
+  { key: "valor_justo", label: "VJ (R$)", group: "vj", align: "right", fmt: fmtBRL },
+  { key: "desconto_aging", label: "Desc. Aging", group: "vj", align: "right", fmt: fmtPct },
+  { key: "valor_justo_reajustado", label: "VJR (R$)", group: "vj", align: "right", fmt: fmtBRL },
+];
+
+const GROUP_COLORS: Record<string, string> = {
+  original: "bg-slate-50",
+  aging: "bg-violet-50",
+  correcao: "bg-amber-50",
+  vj: "bg-emerald-50",
+};
+
+const GROUP_LABELS: Record<string, string> = {
+  original: "Dados Originais",
+  aging: "Aging",
+  correcao: "Correção Monetária",
+  vj: "Valor Justo",
+};
+
+// ─── CSV export column ordering (human-readable headers, PT-BR) ──
+
+const CSV_HEADERS: Record<string, string> = {
+  row_number: "Nº Linha",
+  file_name: "Arquivo Origem",
+  empresa: "Empresa",
+  tipo: "Tipo",
+  status_conta: "Status Conta",
+  situacao: "Situação",
+  nome_cliente: "Nome Cliente",
+  documento: "CPF/CNPJ",
+  classe: "Classe",
+  contrato: "Contrato/UC",
+  valor_principal: "Valor Principal (R$)",
+  valor_nao_cedido: "Valor Não Cedido (R$)",
+  valor_terceiro: "Valor Terceiros (R$)",
+  valor_cip: "Valor CIP (R$)",
+  data_vencimento: "Data Vencimento",
+  data_base: "Data Base",
+  base_origem: "Base Origem",
+  is_voltz: "É VOLTZ",
+  dias_atraso: "Dias de Atraso",
+  aging: "Faixa Aging",
+  aging_taxa: "Aging (Taxa Lookup)",
+  valor_liquido: "Valor Líquido (R$)",
+  multa: "Multa 2% (R$)",
+  juros_moratorios: "Juros Moratórios (R$)",
+  fator_correcao: "Fator de Correção",
+  correcao_monetaria: "Correção Monetária (R$)",
+  valor_corrigido: "Valor Corrigido (R$)",
+  juros_remuneratorios: "Juros Remuneratórios (R$)",
+  saldo_devedor_vencimento: "Saldo Devedor Vencimento (R$)",
+  taxa_recuperacao: "Taxa de Recuperação",
+  prazo_recebimento: "Prazo Recebimento (meses)",
+  valor_recuperavel: "Valor Recuperável (R$)",
+  valor_justo: "Valor Justo (R$)",
+  desconto_aging: "Desconto Aging (%)",
+  valor_justo_reajustado: "Valor Justo Reajustado (R$)",
+};
+
+const CSV_KEY_ORDER = DB_COLUMNS.map((c) => c.key);
+
+const PAGE_SIZE = 50;
+
+// ─── Helpers ──────────────────────────────────────────────────────
+
+function buildExportFilename(
+  originalFiles: string[],
+  processedAt: string | null
+): string {
+  const date = processedAt
+    ? new Date(processedAt)
+    : new Date();
+  const ts = date
+    .toISOString()
+    .replace(/[-:T]/g, "")
+    .slice(0, 14); // YYYYMMDDHHmmss
+
+  const baseName =
+    originalFiles.length === 1
+      ? originalFiles[0].replace(/\.[^.]+$/, "")
+      : "FIDC_Dados";
+
+  return `${baseName}_processado_${ts}.csv`;
+}
+
+function formatDateBR(iso: string | null | undefined): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return d.toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// ─── Metric Card ──────────────────────────────────────────────────
 
 interface MetricCardProps {
   label: string;
@@ -58,113 +239,158 @@ function MetricCard({ label, value, icon, color, delay = 0 }: MetricCardProps) {
   );
 }
 
+// ─── Export logic (builds CSV manually for full control) ──────────
+
+function exportSessionDataToCsv(
+  rows: SessionDataRow[],
+  filename: string,
+  processedAt: string | null
+): void {
+  if (rows.length === 0) return;
+
+  const sep = ";";
+  const headerRow = CSV_KEY_ORDER.map((k) => CSV_HEADERS[k] ?? k).join(sep);
+
+  // Add a metadata row with processing timestamp
+  const metaRow = `# Processado em: ${formatDateBR(processedAt)} | Total registros: ${rows.length}`;
+
+  const dataRows = rows.map((row) =>
+    CSV_KEY_ORDER.map((key) => {
+      const val = row[key];
+      if (val == null) return "";
+      if (typeof val === "number") return val.toFixed(6).replace(".", ",");
+      if (typeof val === "boolean") return val ? "Sim" : "Não";
+      // Escape strings with semicolons or quotes
+      const s = String(val);
+      if (s.includes(sep) || s.includes('"') || s.includes("\n")) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    }).join(sep)
+  );
+
+  const bom = "\uFEFF";
+  const csv = [metaRow, headerRow, ...dataRows].join("\n");
+  const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  COMPONENT
+// ═══════════════════════════════════════════════════════════════════
+
 export function ResultsPage() {
-  const { results, setCurrentStep } = useApp();
-  const [page, setPage] = useState(0);
-  const [sortCol, setSortCol] = useState<keyof FinalRecord | null>(null);
-  const [sortAsc, setSortAsc] = useState(true);
+  const {
+    results,
+    uploadedFiles,
+    setCurrentStep,
+    dbSessionId,
+    processedAt,
+  } = useApp();
 
-  // ── Aggregated metrics ──
-  const metrics = useMemo(() => {
-    if (!results.length) return null;
+  const useDb = isSupabaseConfigured() && !!dbSessionId;
 
-    const totalPrincipal = results.reduce((s, r) => s + (r.valor_principal || 0), 0);
-    const totalCorrigido = results.reduce((s, r) => s + (r.valor_corrigido || 0), 0);
-    const totalJusto = results.reduce((s, r) => s + (r.valor_justo || 0), 0);
-    const totalReajustado = results.reduce(
-      (s, r) => s + (r.valor_justo_reajustado ?? r.valor_justo ?? 0),
-      0
-    );
+  // ── DB state ──
+  const [dbRows, setDbRows] = useState<SessionDataRow[]>([]);
+  const [dbCount, setDbCount] = useState(0);
+  const [dbPage, setDbPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [summary, setSummary] = useState<FidcSummary | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
 
-    const empresas = new Set(results.map((r) => r.empresa)).size;
-    const voltzCount = results.filter((r) => r.empresa?.toUpperCase() === "VOLTZ").length;
+  // ── Load page of DB results ──
+  const loadPage = useCallback(
+    async (page: number) => {
+      if (!dbSessionId) return;
+      setLoading(true);
+      try {
+        const { data, count } = await getResults(dbSessionId, page, PAGE_SIZE);
+        setDbRows(data);
+        setDbCount(count);
+        setDbPage(page);
+      } catch {
+        // silent
+      } finally {
+        setLoading(false);
+      }
+    },
+    [dbSessionId]
+  );
 
+  // ── Initial load ──
+  useEffect(() => {
+    if (useDb && dbSessionId) {
+      loadPage(0);
+      getSummary(dbSessionId).then(setSummary).catch(() => {});
+    }
+  }, [useDb, dbSessionId, loadPage]);
+
+  // ── Local-mode metrics ──
+  const localMetrics = useMemo(() => {
+    if (useDb || !results.length) return null;
     return {
       total: results.length,
-      totalPrincipal,
-      totalCorrigido,
-      totalJusto,
-      totalReajustado,
-      empresas,
-      voltzCount,
+      totalPrincipal: results.reduce((s, r) => s + (r.valor_principal || 0), 0),
+      totalCorrigido: results.reduce((s, r) => s + (r.valor_corrigido || 0), 0),
+      totalJusto: results.reduce((s, r) => s + (r.valor_justo || 0), 0),
+      totalReajustado: results.reduce(
+        (s, r) => s + (r.valor_justo_reajustado ?? r.valor_justo ?? 0),
+        0
+      ),
     };
-  }, [results]);
+  }, [useDb, results]);
 
-  // ── Aging distribution ──
-  const agingDist = useMemo(() => {
-    const map: Record<string, { count: number; valor: number }> = {};
-    for (const r of results) {
-      const key = r.aging || "N/A";
-      if (!map[key]) map[key] = { count: 0, valor: 0 };
-      map[key].count++;
-      map[key].valor += r.valor_corrigido || 0;
+  // ── File names ──
+  const fileNames = useMemo(
+    () =>
+      uploadedFiles
+        .filter((f) => f.validationStatus === "valid")
+        .map((f) => f.name),
+    [uploadedFiles]
+  );
+
+  // ── Export handler (DB mode) ──
+  const handleExportDb = useCallback(async () => {
+    if (!dbSessionId) return;
+    setExporting(true);
+    setExportProgress(10);
+    try {
+      const all = await getAllResultsForExport(dbSessionId);
+      setExportProgress(80);
+      const filename = buildExportFilename(fileNames, processedAt);
+      exportSessionDataToCsv(all, filename, processedAt);
+      setExportProgress(100);
+    } catch (err) {
+      console.error("Export failed:", err);
+    } finally {
+      setTimeout(() => {
+        setExporting(false);
+        setExportProgress(0);
+      }, 1200);
     }
-    return Object.entries(map).sort((a, b) => b[1].valor - a[1].valor);
-  }, [results]);
+  }, [dbSessionId, fileNames, processedAt]);
 
-  // ── Sorted & paginated data ──
-  const sorted = useMemo(() => {
-    if (!sortCol) return results;
-    return [...results].sort((a, b) => {
-      const va = a[sortCol] ?? "";
-      const vb = b[sortCol] ?? "";
-      if (typeof va === "number" && typeof vb === "number") return sortAsc ? va - vb : vb - va;
-      return sortAsc
-        ? String(va).localeCompare(String(vb))
-        : String(vb).localeCompare(String(va));
-    });
-  }, [results, sortCol, sortAsc]);
+  // ── Export handler (local mode) ──
+  const handleExportLocal = useCallback(() => {
+    const filename = buildExportFilename(fileNames, processedAt);
+    exportToCSV(
+      results as unknown as Record<string, unknown>[],
+      filename
+    );
+  }, [results, fileNames, processedAt]);
 
-  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-  const pageData = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const totalPages = useDb
+    ? Math.ceil(dbCount / PAGE_SIZE)
+    : Math.ceil(results.length / PAGE_SIZE);
 
-  const handleSort = (col: keyof FinalRecord) => {
-    if (sortCol === col) {
-      setSortAsc(!sortAsc);
-    } else {
-      setSortCol(col);
-      setSortAsc(true);
-    }
-    setPage(0);
-  };
-
-  const handleExport = () => {
-    exportToCSV(results as unknown as Record<string, unknown>[], `fidc_resultados_${new Date().toISOString().slice(0, 10)}.csv`);
-  };
-
-  // ── Column config ──
-  const columns: { key: keyof FinalRecord; label: string; fmt?: (v: unknown) => string }[] = [
-    { key: "empresa", label: "Empresa" },
-    { key: "tipo", label: "Tipo" },
-    { key: "aging", label: "Aging" },
-    {
-      key: "valor_principal",
-      label: "VP (R$)",
-      fmt: (v) => formatBRL(v as number),
-    },
-    {
-      key: "valor_corrigido",
-      label: "VC (R$)",
-      fmt: (v) => formatBRL(v as number),
-    },
-    {
-      key: "valor_justo",
-      label: "VJ (R$)",
-      fmt: (v) => formatBRL(v as number),
-    },
-    {
-      key: "valor_justo_reajustado",
-      label: "VJ Reaj. (R$)",
-      fmt: (v) => formatBRL(v as number),
-    },
-    {
-      key: "taxa_recuperacao",
-      label: "Taxa Rec.",
-      fmt: (v) => `${((v as number) * 100).toFixed(1)}%`,
-    },
-  ];
-
-  if (!results.length) {
+  // ── Empty state ──
+  if (!useDb && !results.length) {
     return (
       <motion.div
         initial={{ opacity: 0 }}
@@ -172,8 +398,14 @@ export function ResultsPage() {
         className="flex flex-col items-center justify-center py-20 gap-4 text-center"
       >
         <FileSpreadsheet className="w-12 h-12 text-muted-foreground/50" />
-        <p className="text-muted-foreground">Nenhum resultado disponível. Execute o processamento primeiro.</p>
-        <Button variant="outline" onClick={() => setCurrentStep(3)} className="gap-2">
+        <p className="text-muted-foreground">
+          Nenhum resultado disponível. Execute o processamento primeiro.
+        </p>
+        <Button
+          variant="outline"
+          onClick={() => setCurrentStep(3)}
+          className="gap-2"
+        >
           <ArrowLeft className="w-4 h-4" />
           Ir para Processamento
         </Button>
@@ -181,6 +413,9 @@ export function ResultsPage() {
     );
   }
 
+  // ═════════════════════════════════════════════════════════════════
+  //  RENDER
+  // ═════════════════════════════════════════════════════════════════
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -193,175 +428,463 @@ export function ResultsPage() {
         <div>
           <h2 className="text-2xl font-bold text-foreground">Resultados</h2>
           <p className="text-muted-foreground mt-1">
-            Resumo dos cálculos e exportação de dados.
+            Dados completos com todas as etapas de cálculo para validação.
           </p>
+          {processedAt && (
+            <div className="flex items-center gap-1.5 mt-2 text-xs text-muted-foreground">
+              <Calendar className="w-3.5 h-3.5" />
+              Processado em {formatDateBR(processedAt)}
+            </div>
+          )}
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setCurrentStep(3)} className="gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setCurrentStep(3)}
+            className="gap-2"
+          >
             <RefreshCw className="w-4 h-4" />
             Reprocessar
           </Button>
-          <Button onClick={handleExport} className="gap-2">
-            <Download className="w-4 h-4" />
-            Exportar CSV
+          <Button
+            onClick={useDb ? handleExportDb : handleExportLocal}
+            disabled={exporting}
+            className="gap-2"
+          >
+            {exporting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {exporting ? "Exportando..." : "Exportar CSV Completo"}
           </Button>
         </div>
       </div>
 
+      {/* ── Export progress ── */}
+      <AnimatePresence>
+        {exporting && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-4">
+                <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium">
+                    {exportProgress < 80
+                      ? "Buscando todos os registros do banco..."
+                      : exportProgress < 100
+                      ? "Gerando arquivo CSV..."
+                      : "Download iniciado!"}
+                  </p>
+                  <Progress value={exportProgress} className="h-1.5 mt-2" />
+                </div>
+                {exportProgress >= 100 && (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+                )}
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ── Metric cards ── */}
-      {metrics && (
+      {useDb && summary ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <MetricCard
             label="Total Registros"
-            value={formatNumber(metrics.total, 0)}
+            value={formatNumber(summary.total_rows, 0)}
             icon={<FileSpreadsheet className="w-5 h-5" />}
             color="bg-blue-100 text-blue-600"
             delay={0}
           />
           <MetricCard
             label="Valor Principal"
-            value={formatBRL(metrics.totalPrincipal)}
+            value={formatBRL(summary.total_valor_principal)}
             icon={<DollarSign className="w-5 h-5" />}
             color="bg-emerald-100 text-emerald-600"
             delay={0.05}
           />
           <MetricCard
             label="Valor Corrigido"
-            value={formatBRL(metrics.totalCorrigido)}
+            value={formatBRL(summary.total_valor_corrigido)}
             icon={<TrendingUp className="w-5 h-5" />}
             color="bg-amber-100 text-amber-600"
             delay={0.1}
           />
           <MetricCard
             label="Valor Justo Reaj."
-            value={formatBRL(metrics.totalReajustado)}
+            value={formatBRL(summary.total_valor_justo_reajustado)}
             icon={<BarChart3 className="w-5 h-5" />}
             color="bg-purple-100 text-purple-600"
             delay={0.15}
           />
         </div>
+      ) : localMetrics ? (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <MetricCard
+            label="Total Registros"
+            value={formatNumber(localMetrics.total, 0)}
+            icon={<FileSpreadsheet className="w-5 h-5" />}
+            color="bg-blue-100 text-blue-600"
+            delay={0}
+          />
+          <MetricCard
+            label="Valor Principal"
+            value={formatBRL(localMetrics.totalPrincipal)}
+            icon={<DollarSign className="w-5 h-5" />}
+            color="bg-emerald-100 text-emerald-600"
+            delay={0.05}
+          />
+          <MetricCard
+            label="Valor Corrigido"
+            value={formatBRL(localMetrics.totalCorrigido)}
+            icon={<TrendingUp className="w-5 h-5" />}
+            color="bg-amber-100 text-amber-600"
+            delay={0.1}
+          />
+          <MetricCard
+            label="Valor Justo Reaj."
+            value={formatBRL(localMetrics.totalReajustado)}
+            icon={<BarChart3 className="w-5 h-5" />}
+            color="bg-purple-100 text-purple-600"
+            delay={0.15}
+          />
+        </div>
+      ) : null}
+
+      {/* ── Column legend ── */}
+      {useDb && (
+        <Card>
+          <CardContent className="p-3 flex flex-wrap items-center gap-3">
+            <span className="text-xs font-semibold text-muted-foreground mr-1">
+              Grupos de colunas:
+            </span>
+            {Object.entries(GROUP_LABELS).map(([key, label]) => (
+              <Badge
+                key={key}
+                variant="outline"
+                className={`text-[10px] ${GROUP_COLORS[key]}`}
+              >
+                {label}
+              </Badge>
+            ))}
+          </CardContent>
+        </Card>
       )}
 
-      {/* ── Aging distribution ── */}
-      {agingDist.length > 0 && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}>
+      {/* ── Full-detail DB table ── */}
+      {useDb && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.2 }}
+        >
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">Distribuição por Aging</CardTitle>
-            </CardHeader>
-            <CardContent className="p-4">
-              <div className="space-y-2">
-                {agingDist.map(([aging, { count, valor }]) => {
-                  const pct = metrics ? (valor / metrics.totalCorrigido) * 100 : 0;
-                  return (
-                    <div key={aging} className="flex items-center gap-3 text-sm">
-                      <span className="w-40 truncate font-medium">{aging}</span>
-                      <div className="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-500"
-                          style={{ width: `${Math.max(pct, 1)}%` }}
-                        />
-                      </div>
-                      <span className="w-14 text-right text-muted-foreground text-xs">
-                        {count}
-                      </span>
-                      <span className="w-28 text-right text-xs font-medium">
-                        {formatBRL(valor)}
-                      </span>
-                    </div>
-                  );
-                })}
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Table2 className="w-4 h-4 text-primary" />
+                  Dados Calculados — Todas as Etapas
+                </CardTitle>
+                <span className="text-xs text-muted-foreground">
+                  {dbCount > 0
+                    ? `${dbPage * PAGE_SIZE + 1}–${Math.min(
+                        (dbPage + 1) * PAGE_SIZE,
+                        dbCount
+                      )} de ${dbCount.toLocaleString("pt-BR")}`
+                    : "Carregando..."}
+                </span>
               </div>
+            </CardHeader>
+            <CardContent className="p-0 overflow-x-auto">
+              <div className="max-h-[500px] overflow-y-auto">
+                <table className="w-full text-[11px] whitespace-nowrap">
+                  {/* column group header */}
+                  <thead className="sticky top-0 z-20">
+                    <tr>
+                      {DB_COLUMNS.map((col) => (
+                        <th
+                          key={col.key}
+                          className={`px-2 py-1 text-[9px] font-semibold uppercase tracking-wider border-b ${GROUP_COLORS[col.group]} text-muted-foreground`}
+                        >
+                          {GROUP_LABELS[col.group]}
+                        </th>
+                      ))}
+                    </tr>
+                    <tr className="bg-white">
+                      {DB_COLUMNS.map((col) => (
+                        <th
+                          key={col.key}
+                          className={`px-2 py-1.5 font-semibold border-b text-muted-foreground ${
+                            col.align === "right" ? "text-right" : "text-left"
+                          }`}
+                        >
+                          {col.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loading ? (
+                      <tr>
+                        <td
+                          colSpan={DB_COLUMNS.length}
+                          className="text-center py-12"
+                        >
+                          <Loader2 className="w-5 h-5 animate-spin mx-auto text-muted-foreground" />
+                        </td>
+                      </tr>
+                    ) : dbRows.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={DB_COLUMNS.length}
+                          className="text-center py-12 text-muted-foreground"
+                        >
+                          Nenhum resultado
+                        </td>
+                      </tr>
+                    ) : (
+                      dbRows.map((row) => (
+                        <tr
+                          key={row.id}
+                          className="border-b border-dashed last:border-0 hover:bg-slate-50/50"
+                        >
+                          {DB_COLUMNS.map((col) => {
+                            const raw = row[col.key];
+                            const display = col.fmt
+                              ? col.fmt(raw)
+                              : raw != null
+                              ? String(raw)
+                              : "";
+                            const isVjr =
+                              col.key === "valor_justo_reajustado";
+                            return (
+                              <td
+                                key={col.key}
+                                className={`px-2 py-1 ${
+                                  col.align === "right"
+                                    ? "text-right"
+                                    : "text-left"
+                                } ${isVjr ? "font-medium text-emerald-700" : ""}`}
+                              >
+                                {col.key === "empresa" &&
+                                row.is_voltz ? (
+                                  <span className="flex items-center gap-0.5">
+                                    <Zap className="w-3 h-3 text-amber-500 inline" />
+                                    {display}
+                                  </span>
+                                ) : (
+                                  display
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between px-4 py-3 border-t">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => loadPage(dbPage - 1)}
+                    disabled={dbPage === 0 || loading}
+                    className="gap-1"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    Anterior
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    Página {dbPage + 1} de {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => loadPage(dbPage + 1)}
+                    disabled={
+                      (dbPage + 1) * PAGE_SIZE >= dbCount || loading
+                    }
+                    className="gap-1"
+                  >
+                    Próxima
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
       )}
 
-      {/* ── Data table ── */}
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="data-table w-full text-sm">
-              <thead>
-                <tr>
-                  {columns.map((col) => (
-                    <th
-                      key={col.key}
-                      className="px-3 py-2 text-left cursor-pointer hover:bg-slate-100 select-none transition-colors whitespace-nowrap"
-                      onClick={() => handleSort(col.key)}
-                    >
-                      <span className="flex items-center gap-1">
-                        {col.label}
-                        {sortCol === col.key && (
-                          <span className="text-xs">{sortAsc ? "▲" : "▼"}</span>
-                        )}
-                      </span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pageData.map((row, i) => (
-                  <tr
-                    key={i}
-                    className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors"
-                  >
-                    {columns.map((col) => (
-                      <td key={col.key} className="px-3 py-2 whitespace-nowrap">
-                        {col.key === "empresa" && row.empresa?.toUpperCase() === "VOLTZ" ? (
-                          <Badge variant="warning" className="text-[10px]">
-                            {String(row[col.key] ?? "")}
-                          </Badge>
-                        ) : col.fmt ? (
-                          col.fmt(row[col.key])
-                        ) : (
-                          String(row[col.key] ?? "")
-                        )}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
-
-        {/* ── Pagination ── */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between mt-3">
-            <p className="text-xs text-muted-foreground">
-              Mostrando {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, sorted.length)} de{" "}
-              {sorted.length}
-            </p>
-            <div className="flex gap-1">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page === 0}
-                onClick={() => setPage((p) => p - 1)}
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page >= totalPages - 1}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                <ChevronRight className="w-4 h-4" />
-              </Button>
-            </div>
-          </div>
-        )}
-      </motion.div>
+      {/* ── Local-mode table (fallback, simpler) ── */}
+      {!useDb && results.length > 0 && (
+        <LocalResultsTable
+          results={results}
+          page={dbPage}
+          setPage={setDbPage}
+          pageSize={PAGE_SIZE}
+        />
+      )}
 
       {/* ── Back ── */}
       <div className="flex items-center justify-start pt-4">
-        <Button variant="outline" onClick={() => setCurrentStep(3)} className="gap-2">
+        <Button
+          variant="outline"
+          onClick={() => setCurrentStep(3)}
+          className="gap-2"
+        >
           <ArrowLeft className="w-4 h-4" />
           Voltar
         </Button>
       </div>
+    </motion.div>
+  );
+}
+
+// ─── Local fallback table (preserved from original) ───────────────
+
+function LocalResultsTable({
+  results,
+  page,
+  setPage,
+  pageSize,
+}: {
+  results: FinalRecord[];
+  page: number;
+  setPage: (p: number) => void;
+  pageSize: number;
+}) {
+  const [sortCol, setSortCol] = useState<keyof FinalRecord | null>(null);
+  const [sortAsc, setSortAsc] = useState(true);
+
+  const columns: {
+    key: keyof FinalRecord;
+    label: string;
+    fmt?: (v: unknown) => string;
+  }[] = [
+    { key: "empresa", label: "Empresa" },
+    { key: "tipo", label: "Tipo" },
+    { key: "aging", label: "Aging" },
+    { key: "valor_principal", label: "VP (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "valor_liquido", label: "VL (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "multa", label: "Multa (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "juros_moratorios", label: "Juros (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "correcao_monetaria", label: "Correção (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "valor_corrigido", label: "VC (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "taxa_recuperacao", label: "Taxa Rec.", fmt: (v) => `${((v as number) * 100).toFixed(1)}%` },
+    { key: "valor_justo", label: "VJ (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "valor_justo_reajustado", label: "VJR (R$)", fmt: (v) => formatBRL(v as number) },
+  ];
+
+  const sorted = useMemo(() => {
+    if (!sortCol) return results;
+    return [...results].sort((a, b) => {
+      const va = a[sortCol] ?? "";
+      const vb = b[sortCol] ?? "";
+      if (typeof va === "number" && typeof vb === "number")
+        return sortAsc ? va - vb : vb - va;
+      return sortAsc
+        ? String(va).localeCompare(String(vb))
+        : String(vb).localeCompare(String(va));
+    });
+  }, [results, sortCol, sortAsc]);
+
+  const totalPages = Math.ceil(sorted.length / pageSize);
+  const pageData = sorted.slice(page * pageSize, (page + 1) * pageSize);
+
+  const handleSort = (col: keyof FinalRecord) => {
+    if (sortCol === col) setSortAsc(!sortAsc);
+    else {
+      setSortCol(col);
+      setSortAsc(true);
+    }
+    setPage(0);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ delay: 0.3 }}
+    >
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="data-table w-full text-sm">
+            <thead>
+              <tr>
+                {columns.map((col) => (
+                  <th
+                    key={col.key}
+                    className="px-3 py-2 text-left cursor-pointer hover:bg-slate-100 select-none transition-colors whitespace-nowrap"
+                    onClick={() => handleSort(col.key)}
+                  >
+                    <span className="flex items-center gap-1">
+                      {col.label}
+                      {sortCol === col.key && (
+                        <span className="text-xs">
+                          {sortAsc ? "▲" : "▼"}
+                        </span>
+                      )}
+                    </span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {pageData.map((row, i) => (
+                <tr
+                  key={i}
+                  className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors"
+                >
+                  {columns.map((col) => (
+                    <td
+                      key={col.key}
+                      className="px-3 py-2 whitespace-nowrap"
+                    >
+                      {col.fmt
+                        ? col.fmt(row[col.key])
+                        : String(row[col.key] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-3">
+          <p className="text-xs text-muted-foreground">
+            Mostrando {page * pageSize + 1}–
+            {Math.min((page + 1) * pageSize, sorted.length)} de{" "}
+            {sorted.length}
+          </p>
+          <div className="flex gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page === 0}
+              onClick={() => setPage(page - 1)}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages - 1}
+              onClick={() => setPage(page + 1)}
+            >
+              <ChevronRight className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </motion.div>
   );
 }
