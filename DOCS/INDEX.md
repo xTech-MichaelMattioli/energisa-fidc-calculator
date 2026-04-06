@@ -74,7 +74,7 @@ Contém a **modelagem matemática rigorosa** do sistema:
 | Documento | Descrição | Conteúdo |
 |-----------|-----------|---------|
 | **Modelagem Matemática.md** | Fundamentos teóricos completos. Conceito de valor justo, metodologia correção monetária (IGP-M até mai/2021, IPCA após), fórmula VL = VP - VNC - VT - VCIP, cálculo de encargos, VPL, taxa desconto | Equações principais |
-| **Regras_Calculo_Correcao_Melhorado.md** | Regras refinadas especificamente para cálculo de correção monetária, periodicidades, tratamento de períodos incompletos | Correção monetária |
+| **Regras_Calculo_Correcao_Melhorado.md** | Guia operacional atualizado da implementação real em `energisa-fidc-calculator-distrib`: encadeamento ponta a ponta, fórmulas por etapa, dados mínimos, arquivos obrigatórios e ordem de execução | Correção + Valor Justo + Remuneração Variável |
 | **METODO_GERAL_REMUNERACAO_VARIAVEL.md** | Método genérico de remuneração variável por aging, faixas padrão FIDC (6.5%, 8%, 15%, 22%, 36%, 50%), suporte multi-distribuidora, validações, logs | Remuneração variável |
 
 💡 **Principais Conceitos:**
@@ -141,7 +141,7 @@ Contém **exemplos executáveis** e ferramentas de desenvolvimento:
 
 ### 💻 Cenário 2: "Vou implementar um novo cálculo"
 1. Leia **02_Documentacao_Oficial/** → Especificação
-2. Consulte **03_Modelagem_Matematica/** → Fórmulas exatas
+2. Consulte **03_Modelagem_Matematica/Regras_Calculo_Correcao_Melhorado.md** → Encadeamento implementado + insumos obrigatórios
 3. Valide contra **04_Dicionarios_e_Referencia/DICIONARIO_DADOS_DF_FINAL.md** → Tipos dados
 4. Teste com **05_Notebooks_e_Desenvolvimento/FIDC_Calculo...** → Validação
 
