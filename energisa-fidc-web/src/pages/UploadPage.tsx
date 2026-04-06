@@ -1,24 +1,24 @@
 /**
  * Page 1: Upload (Carregamento)
  *
- * NEW "upload-first, validate-later" flow:
+ * NEW flow — "convert locally, upload CSV, no edge function":
  *
- *  1. User drops files → each is uploaded DIRECTLY to Storage
- *     (`para_validacao/<session>/file.xlsx`) with real-time progress.
- *  2. Once all uploads finish, files are listed from Storage.
- *  3. User clicks "Validar" → edge function validates each file.
- *     - Invalid → file deleted + reason shown.
- *     - Valid   → moved to `validados/`, columns extracted.
- *  4. User clicks "Próximo" to proceed to Mapping.
+ *  1. User drops Excel files.
+ *  2. Web Worker converts each Excel → CSV + extracts column metadata.
+ *     Validation happens inside the Worker (header detection).
+ *  3. Valid CSVs are uploaded to Storage (`para_validacao/<session>/file.csv`).
+ *  4. Invalid files are rejected immediately with a reason.
+ *  5. No edge function needed — zero 422 errors on large files.
+ *  6. User clicks "Próximo" to proceed to Mapping.
  */
 import { useCallback, useState, useEffect } from "react";
 import { useApp } from "@/context/AppContext";
+import { convertExcelToCsvAsync } from "@/services/excel-worker.service";
 import {
-  uploadFileForValidation,
+  uploadCsvBlob,
   listSessionStageFiles,
   deleteFileFromStorage,
 } from "@/services/storage.service";
-import { validateFile } from "@/services/validation-processor.service";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -37,9 +37,8 @@ import {
   ShieldCheck,
   ShieldX,
   Columns3,
-  PlayCircle,
-  FolderOpen,
   RefreshCw,
+  FileType2,
 } from "lucide-react";
 import { formatNumber } from "@/lib/utils";
 import type { UploadedFile } from "@/types";
@@ -55,8 +54,7 @@ export function UploadPage() {
   const { uploadedFiles, setUploadedFiles, setCurrentStep } = useApp();
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isValidating, setIsValidating] = useState(false);
-  const [validationProgress, setValidationProgress] = useState<{
+  const [processingOverlay, setProcessingOverlay] = useState<{
     current: number;
     total: number;
     fileName: string;
@@ -70,13 +68,13 @@ export function UploadPage() {
     const stored = await listSessionStageFiles("para_validacao");
     const validados = await listSessionStageFiles("validados");
 
-    // Merge stored files into state (don't duplicate)
     setUploadedFiles((prev) => {
       const existingPaths = new Set(prev.map((f) => f.storagePath));
       const newFromStorage: UploadedFile[] = [];
 
       for (const sf of [...stored, ...validados]) {
         if (existingPaths.has(sf.path)) continue;
+        const isCsv = sf.name.endsWith(".csv");
         newFromStorage.push({
           id: crypto.randomUUID(),
           name: sf.name,
@@ -84,7 +82,7 @@ export function UploadPage() {
           storagePath: sf.path,
           uploadStatus: "uploaded",
           uploadProgress: 100,
-          validationStatus: sf.path.startsWith("validados/") ? "valid" : "pending",
+          validationStatus: isCsv ? "valid" : "pending",
           columns: [],
           rowCount: 0,
           isVoltz:
@@ -103,11 +101,13 @@ export function UploadPage() {
   }, [refreshFileList]);
 
   // ── Handle file drop / selection ────────────────────────────────
+  // New flow: Excel → Worker (convert to CSV + validate) → Upload CSV
   const handleFiles = useCallback(
     async (fileList: FileList | File[]) => {
       setError(null);
 
-      const files = Array.from(fileList).filter(
+      const allFiles = Array.from(fileList);
+      const files = allFiles.filter(
         (f) => f.name.endsWith(".xlsx") || f.name.endsWith(".xls")
       );
 
@@ -116,17 +116,29 @@ export function UploadPage() {
         return;
       }
 
+      // Warn about very large files — the Worker needs to parse the entire
+      // Excel binary in memory; files over 100 MB may be slow or crash.
+      const LARGE_FILE_BYTES = 100 * 1024 * 1024; // 100 MB
+      const largeFiles = files.filter((f) => f.size > LARGE_FILE_BYTES);
+      if (largeFiles.length > 0) {
+        setError(
+          `Atenção: ${largeFiles.map((f) => f.name).join(", ")} ${largeFiles.length > 1 ? "são arquivos grandes" : "é um arquivo grande"} (>${Math.round(largeFiles[0].size / 1024 / 1024)} MB). ` +
+          `O processamento pode demorar vários minutos e consumir bastante memória do navegador. Se travar, divida o arquivo em partes menores.`
+        );
+        // Do NOT return — let the user proceed anyway
+      }
+
       if (!supabaseReady) {
         setError("Supabase não configurado. Configure as variáveis de ambiente.");
         return;
       }
 
-      // Create placeholder entries immediately (uploading state)
+      // Create placeholder entries immediately
       const placeholders: UploadedFile[] = files.map((f) => ({
         id: crypto.randomUUID(),
         name: f.name,
         size: f.size,
-        uploadStatus: "uploading" as const,
+        uploadStatus: "converting" as const,
         uploadProgress: 0,
         validationStatus: "pending" as const,
         columns: [],
@@ -139,32 +151,96 @@ export function UploadPage() {
 
       setUploadedFiles((prev) => [...prev, ...placeholders]);
 
-      // Upload each file in parallel with progress
+      // Process each file: convert → validate → upload CSV
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const id = placeholders[i].id;
 
-        // Fire-and-forget per file (parallel uploads)
+        setProcessingOverlay({
+          current: i + 1,
+          total: files.length,
+          fileName: file.name,
+          step: "Convertendo Excel → CSV…",
+        });
+
+        // Fire-and-forget per file
         (async () => {
           try {
-            const result = await uploadFileForValidation(file, (_loaded, _total, percent) => {
+            // ── Step 1: Worker converts Excel → CSV + validates header ──
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id ? { ...f, uploadStatus: "converting" as const } : f
+              )
+            );
+
+            const result = await convertExcelToCsvAsync(file);
+
+            // ── Step 2: Check validation ──
+            if (!result.valid) {
               setUploadedFiles((prev) =>
                 prev.map((f) =>
                   f.id === id
-                    ? { ...f, uploadProgress: Math.round(percent) }
+                    ? {
+                        ...f,
+                        uploadStatus: "error" as const,
+                        validationStatus: "invalid" as const,
+                        validationError: result.error ?? "Cabeçalho inválido.",
+                      }
                     : f
                 )
               );
-            });
+              return;
+            }
 
+            // ── Step 3: Upload CSV to Storage with progress ──
             setUploadedFiles((prev) =>
               prev.map((f) =>
                 f.id === id
                   ? {
                       ...f,
-                      storagePath: result.path,
+                      uploadStatus: "uploading_csv" as const,
+                      uploadProgress: 0,
+                      // Populate metadata from worker immediately
+                      columns: result.columns,
+                      columnInfo: result.columnInfo,
+                      rowCount: result.rowCount,
+                      sheetName: result.sheetName,
+                      isVoltz: result.isVoltz || f.isVoltz,
+                      detectedDate: result.detectedDate,
+                    }
+                  : f
+              )
+            );
+
+            setProcessingOverlay((prev) =>
+              prev ? { ...prev, step: `Enviando CSV (${formatBytes(result.csvSize)})…` } : null
+            );
+
+            const uploadResult = await uploadCsvBlob(
+              result.csvBuffer,
+              file.name,
+              (_loaded, _total, percent) => {
+                setUploadedFiles((prev) =>
+                  prev.map((f) =>
+                    f.id === id
+                      ? { ...f, uploadProgress: Math.round(percent) }
+                      : f
+                  )
+                );
+              }
+            );
+
+            // ── Done! ──
+            setUploadedFiles((prev) =>
+              prev.map((f) =>
+                f.id === id
+                  ? {
+                      ...f,
+                      storagePath: uploadResult.path,
+                      csvPath: uploadResult.path,
                       uploadStatus: "uploaded" as const,
                       uploadProgress: 100,
+                      validationStatus: "valid" as const,
                     }
                   : f
               )
@@ -186,100 +262,13 @@ export function UploadPage() {
           }
         })();
       }
+
+      // Clear overlay once all fire-and-forget calls launched
+      // (individual progress shows on each card)
+      setTimeout(() => setProcessingOverlay(null), 800);
     },
     [supabaseReady, setUploadedFiles]
   );
-
-  // ── Validate all pending files ─────────────────────────────────
-  const validateAllFiles = useCallback(async () => {
-    const pendingFiles = uploadedFiles.filter(
-      (f) =>
-        f.uploadStatus === "uploaded" &&
-        f.validationStatus === "pending" &&
-        f.storagePath
-    );
-
-    if (pendingFiles.length === 0) return;
-
-    setIsValidating(true);
-
-    for (let i = 0; i < pendingFiles.length; i++) {
-      const file = pendingFiles[i];
-      const id = file.id;
-
-      setValidationProgress({
-        current: i + 1,
-        total: pendingFiles.length,
-        fileName: file.name,
-        step: "Iniciando validação…",
-      });
-
-      // Mark as validating
-      setUploadedFiles((prev) =>
-        prev.map((f) =>
-          f.id === id ? { ...f, validationStatus: "validating" as const } : f
-        )
-      );
-
-      const outcome = await validateFile(
-        file.storagePath!,
-        file.name,
-        (step, detail) => {
-          setValidationProgress((prev) =>
-            prev ? { ...prev, step: detail ?? step } : null
-          );
-        }
-      );
-
-      if (outcome.status === "valid") {
-        setUploadedFiles((prev) =>
-          prev.map((f) =>
-            f.id === id
-              ? {
-                  ...f,
-                  validationStatus: "valid" as const,
-                  storagePath: outcome.validadosPath,
-                  columns: outcome.columns,
-                  columnInfo: outcome.columnInfo,
-                  rowCount: outcome.rowCount,
-                  sheetName: outcome.sheetName,
-                  isVoltz: outcome.isVoltz || f.isVoltz,
-                }
-              : f
-          )
-        );
-      } else if (outcome.status === "invalid") {
-        setUploadedFiles((prev) =>
-          prev.map((f) =>
-            f.id === id
-              ? {
-                  ...f,
-                  validationStatus: "invalid" as const,
-                  validationError: outcome.error,
-                  uploadStatus: "error" as const,
-                }
-              : f
-          )
-        );
-      } else {
-        // error contacting edge function — keep file, mark error
-        setUploadedFiles((prev) =>
-          prev.map((f) =>
-            f.id === id
-              ? {
-                  ...f,
-                  validationStatus: "error" as const,
-                  validationError: outcome.error,
-                }
-              : f
-          )
-        );
-      }
-    }
-
-    setIsValidating(false);
-    setValidationProgress(null);
-  }, [uploadedFiles, setUploadedFiles]);
 
   // ── Drop handler ────────────────────────────────────────────────
   const handleDrop = useCallback(
@@ -306,13 +295,11 @@ export function UploadPage() {
   };
 
   // ── Derived state ───────────────────────────────────────────────
-  const anyUploading = uploadedFiles.some((f) => f.uploadStatus === "uploading");
-  const pendingValidation = uploadedFiles.filter(
-    (f) => f.uploadStatus === "uploaded" && f.validationStatus === "pending"
+  const anyProcessing = uploadedFiles.some(
+    (f) => f.uploadStatus === "converting" || f.uploadStatus === "uploading_csv" || f.uploadStatus === "uploading"
   );
   const validFiles = uploadedFiles.filter((f) => f.validationStatus === "valid");
-  const canProceed =
-    validFiles.length > 0 && !anyUploading && !isValidating;
+  const canProceed = validFiles.length > 0 && !anyProcessing;
 
   return (
     <motion.div
@@ -321,11 +308,11 @@ export function UploadPage() {
       transition={{ duration: 0.4 }}
       className="space-y-6"
     >
-      {/* ── Validation Overlay ── */}
+      {/* ── Processing Overlay ── */}
       <AnimatePresence>
-        {validationProgress && (
+        {processingOverlay && (
           <motion.div
-            key="validation-overlay"
+            key="processing-overlay"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -341,30 +328,30 @@ export function UploadPage() {
               <div className="relative flex items-center justify-center w-20 h-20">
                 <div className="absolute inset-0 rounded-full border-4 border-primary/20" />
                 <div className="absolute inset-0 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-                <ShieldCheck className="w-7 h-7 text-primary" />
+                <FileType2 className="w-7 h-7 text-primary" />
               </div>
 
               <div className="text-center space-y-1">
                 <p className="text-base font-semibold text-foreground">
-                  Validando arquivo{validationProgress.total > 1 ? "s" : ""}…
+                  Processando arquivo{processingOverlay.total > 1 ? "s" : ""}…
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {validationProgress.total > 1
-                    ? `Arquivo ${validationProgress.current} de ${validationProgress.total}`
-                    : validationProgress.step}
+                  {processingOverlay.total > 1
+                    ? `Arquivo ${processingOverlay.current} de ${processingOverlay.total}`
+                    : processingOverlay.step}
                 </p>
                 <p className="text-xs font-medium text-primary truncate max-w-[220px]">
-                  {validationProgress.fileName}
+                  {processingOverlay.fileName}
                 </p>
               </div>
 
-              {validationProgress.total > 1 && (
+              {processingOverlay.total > 1 && (
                 <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
                   <motion.div
                     className="h-full bg-primary rounded-full"
                     initial={{ width: 0 }}
                     animate={{
-                      width: `${(validationProgress.current / validationProgress.total) * 100}%`,
+                      width: `${(processingOverlay.current / processingOverlay.total) * 100}%`,
                     }}
                     transition={{ duration: 0.3 }}
                   />
@@ -372,7 +359,7 @@ export function UploadPage() {
               )}
 
               <p className="text-xs text-muted-foreground">
-                {validationProgress.step}
+                {processingOverlay.step}
               </p>
             </motion.div>
           </motion.div>
@@ -465,40 +452,6 @@ export function UploadPage() {
         )}
       </AnimatePresence>
 
-      {/* ── Validate Button (when there are pending files) ── */}
-      {pendingValidation.length > 0 && !isValidating && (
-        <motion.div
-          initial={{ opacity: 0, y: 5 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
-          <Card className="border-amber-200 bg-amber-50/30">
-            <CardContent className="flex items-center justify-between p-4">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-amber-100 text-amber-600">
-                  <FolderOpen className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-foreground">
-                    {pendingValidation.length} arquivo(s) aguardando validação
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Clique para validar os cabeçalhos e extrair colunas via servidor
-                  </p>
-                </div>
-              </div>
-              <Button
-                onClick={validateAllFiles}
-                className="gap-2"
-                disabled={anyUploading}
-              >
-                <PlayCircle className="w-4 h-4" />
-                Validar Arquivos
-              </Button>
-            </CardContent>
-          </Card>
-        </motion.div>
-      )}
-
       {/* ── File List ── */}
       <AnimatePresence mode="popLayout">
         {uploadedFiles.map((file, idx) => (
@@ -545,16 +498,29 @@ export function UploadPage() {
                       </Badge>
                     )}
 
-                    {/* Upload status */}
+                    {/* Upload / processing status */}
+                    {file.uploadStatus === "converting" && (
+                      <Badge variant="default" className="gap-1 bg-violet-50 text-violet-600 border-violet-200">
+                        <Loader2 className="w-3 h-3 animate-spin" />Convertendo…
+                      </Badge>
+                    )}
+                    {file.uploadStatus === "uploading_csv" && (
+                      <Badge variant="default" className="gap-1 bg-amber-50 text-amber-600 border-amber-200">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        {file.uploadProgress !== undefined
+                          ? `Enviando CSV ${file.uploadProgress}%`
+                          : "Enviando CSV…"}
+                      </Badge>
+                    )}
                     {file.uploadStatus === "uploading" && (
                       <Badge variant="default" className="gap-1 bg-amber-50 text-amber-600 border-amber-200">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         {file.uploadProgress !== undefined
-                          ? `${file.uploadProgress}% • ${formatBytes(file.size)}`
+                          ? `${file.uploadProgress}%`
                           : "Enviando…"}
                       </Badge>
                     )}
-                    {file.uploadStatus === "uploaded" && file.validationStatus === "pending" && (
+                    {file.uploadStatus === "uploaded" && file.validationStatus === "valid" && (
                       <Badge variant="default" className="gap-1 bg-sky-100 text-sky-700 border-sky-200">
                         <Cloud className="w-3 h-3" />No Storage
                       </Badge>
@@ -603,7 +569,7 @@ export function UploadPage() {
                   </div>
 
                   {/* Upload progress bar */}
-                  {file.uploadStatus === "uploading" && file.uploadProgress !== undefined && (
+                  {(file.uploadStatus === "uploading" || file.uploadStatus === "uploading_csv") && file.uploadProgress !== undefined && (
                     <div className="mt-2">
                       <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
                         <motion.div
@@ -658,7 +624,7 @@ export function UploadPage() {
               <CheckCircle2 className="w-3.5 h-3.5" />
               {validFiles.length}/{uploadedFiles.length} validados
             </span>
-            {(anyUploading || isValidating) && (
+            {anyProcessing && (
               <span className="flex items-center gap-1 text-amber-600">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />processando…
               </span>
@@ -666,19 +632,8 @@ export function UploadPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            {pendingValidation.length > 0 && !isValidating && (
-              <Button
-                variant="outline"
-                onClick={validateAllFiles}
-                className="gap-2"
-                disabled={anyUploading}
-              >
-                <PlayCircle className="w-4 h-4" />
-                Validar ({pendingValidation.length})
-              </Button>
-            )}
             <Button onClick={proceed} className="gap-2" disabled={!canProceed}>
-              {isValidating || anyUploading ? (
+              {anyProcessing ? (
                 <><Loader2 className="w-4 h-4 animate-spin" />Aguardar…</>
               ) : (
                 <>Próximo: Mapeamento<ArrowRight className="w-4 h-4" /></>

@@ -170,6 +170,13 @@ function detectDate(name: string): string | undefined {
 
 // ── Core: parse workbook + find header ────────────────────────────
 
+/**
+ * Load a workbook and detect the header row.
+ * Only reads the first HEADER_SCAN_ROWS rows from the sheet to minimise
+ * memory usage — critical for files with hundreds of thousands of rows.
+ */
+const HEADER_SCAN_ROWS = 15;
+
 function parseWorkbook(buffer: ArrayBuffer) {
   const uint8 = new Uint8Array(buffer);
   const workbook = XLSX.read(uint8, {
@@ -180,11 +187,26 @@ function parseWorkbook(buffer: ArrayBuffer) {
   const sheetName = workbook.SheetNames[0];
   const worksheet = workbook.Sheets[sheetName];
 
+  // Build a limited range covering only the first HEADER_SCAN_ROWS rows.
+  // This avoids allocating a JS array for every row in the sheet just to
+  // find the header — a 1 M-row file would create ~1 M arrays otherwise.
+  const fullRef = worksheet["!ref"];
+  const scanRange = fullRef
+    ? (() => {
+        const r = XLSX.utils.decode_range(fullRef);
+        return {
+          s: r.s,
+          e: { r: Math.min(r.e.r, HEADER_SCAN_ROWS - 1), c: r.e.c },
+        };
+      })()
+    : undefined;
+
   const rawRows = XLSX.utils.sheet_to_json(worksheet, {
     header: 1,
     raw: false,
     defval: "",
     blankrows: false,
+    range: scanRange,
   }) as unknown[][];
 
   const headerRowIdx = findHeaderRowIndex(rawRows);
@@ -335,35 +357,44 @@ function handleConvert(id: string, buffer: ArrayBuffer, name: string, size: numb
   const range = XLSX.utils.decode_range(ref);
   range.s.r = headerRowIdx;
 
+  // Trim sheet to start from headerRowIdx before CSV generation
+  worksheet["!ref"] = XLSX.utils.encode_range(range);
+
   // ── Generate CSV directly from the worksheet (fast, native XLSX) ──
-  // sheet_to_csv uses the range, so it starts from headerRowIdx.
   const csvString = XLSX.utils.sheet_to_csv(worksheet, {
     FS: ",",
     RS: "\n",
     strip: false,
     blankrows: false,
     skipHidden: true,
-    range,
   });
 
   const csvBytes = new TextEncoder().encode(csvString);
   const csvBuffer = csvBytes.buffer;
 
-  // ── Keyed data for column metadata (only sample rows) ──
-  const keyedData = XLSX.utils.sheet_to_json(worksheet, {
+  // ── Row count from worksheet range (header is at range.s.r, data below) ──
+  // Avoids loading all rows into JS objects just to count them.
+  const rowCount = Math.max(0, range.e.r - range.s.r);
+
+  // ── Keyed data for column metadata — SAMPLE ONLY ──
+  // For a 1M-row file, sheet_to_json over all rows would create 1M JS objects.
+  // We only need a small sample (150 rows) to infer column types, so we cap
+  // the range here.  rowCount is already derived from the worksheet ref above.
+  const SAMPLE_SIZE = 150;
+  const sampleRange = {
+    s: range.s,
+    e: { r: Math.min(range.e.r, range.s.r + SAMPLE_SIZE), c: range.e.c },
+  };
+  const sampleRows = XLSX.utils.sheet_to_json(worksheet, {
     raw: false,
     defval: "",
-    range,
+    range: sampleRange,
   }) as Record<string, unknown>[];
 
-  const rowCount = keyedData.length;
-  const sampleSize = Math.min(rowCount, 150);
-  const sampleRows = keyedData.slice(0, sampleSize);
-
-  // Refine columns from actual keyed data
+  // Refine columns from sample data
   const finalColumns =
-    keyedData.length > 0
-      ? Object.keys(keyedData[0]).filter((k) => !isMetadataColumn(k))
+    sampleRows.length > 0
+      ? Object.keys(sampleRows[0]).filter((k) => !isMetadataColumn(k))
       : columns;
 
   // ── Column metadata ──
@@ -402,7 +433,7 @@ function handleConvert(id: string, buffer: ArrayBuffer, name: string, size: numb
   };
 
   // Transfer csvBuffer (zero-copy)
-  self.postMessage(out, [csvBuffer]);
+  (self as unknown as Worker).postMessage(out, [csvBuffer]);
 }
 
 // ── Worker message handler ────────────────────────────────────────
