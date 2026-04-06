@@ -40,6 +40,10 @@ interface AppState {
   setProcessingProgress: (p: ProcessingProgress | null) => void;
   isProcessing: boolean;
   setIsProcessing: (v: boolean) => void;
+  dbSessionId: string | null;
+  setDbSessionId: (id: string | null) => void;
+  processedAt: string | null;
+  setProcessedAt: (d: string | null) => void;
 
   // Step 5: Results
   results: FinalRecord[];
@@ -59,6 +63,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [dataBase, setDataBase] = useState("2025-04-30");
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [dbSessionId, setDbSessionId] = useState<string | null>(null);
+  const [processedAt, setProcessedAt] = useState<string | null>(null);
   const [results, setResults] = useState<FinalRecord[]>([]);
 
   return (
@@ -74,6 +80,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dataBase, setDataBase,
         processingProgress, setProcessingProgress,
         isProcessing, setIsProcessing,
+        dbSessionId, setDbSessionId,
+        processedAt, setProcessedAt,
         results, setResults,
       }}
     >

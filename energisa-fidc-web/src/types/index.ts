@@ -167,11 +167,14 @@ export interface FieldMapping {
 
 export type ProcessingStep =
   | "idle"
+  | "setup"
   | "validating"
+  | "ingest"
   | "aging"
   | "correction"
   | "recovery"
   | "fair-value"
+  | "fair_value"
   | "remuneration"
   | "exporting"
   | "complete"
