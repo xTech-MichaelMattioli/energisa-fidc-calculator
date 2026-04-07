@@ -1,7 +1,8 @@
 """
 FIDC Compute Worker — FastAPI
-Endpoint assíncrono: recebe sessionId, lista arquivos do Supabase Storage,
-processa com Pandas vetorizado, salva CSV no Storage e registra status em
+Endpoint assíncrono: recebe sessionId, lê CSVs diretamente do Supabase Storage
+(paths armazenados em fidc_sessions.metadata.files), processa com Pandas
+vetorizado, salva CSV resultado no Storage e registra status + summary em
 fidc_compute_jobs.
 """
 from __future__ import annotations
@@ -9,9 +10,10 @@ from __future__ import annotations
 import io
 import os
 import uuid
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,24 +23,16 @@ from supabase import create_client, Client
 
 from calculator_vectorized import (
     calculate_vectorized,
+    compute_summary,
     get_ipca_monthly,
     get_di_pre_rate,
 )
 
 load_dotenv()
 
-SUPABASE_URL       = os.environ["SUPABASE_URL"]
+SUPABASE_URL         = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-BUCKET             = "temp"
-FETCH_BATCH_SIZE   = 2_000   # linhas por requisição REST (I/O)
-
-# Colunas brutas lidas do DB
-RAW_COLS = (
-    "id,row_number,file_name,empresa,tipo,status_conta,situacao,"
-    "nome_cliente,documento,classe,contrato,"
-    "valor_principal,valor_nao_cedido,valor_terceiro,valor_cip,"
-    "data_vencimento,data_base,base_origem,is_voltz"
-)
+BUCKET               = "temp"
 
 # Ordem das colunas no CSV de saída
 CSV_COLS = [
@@ -111,6 +105,60 @@ def _build_csv(result_df: pd.DataFrame) -> str:
     return buf.getvalue()
 
 
+# ─── CSV parsing helpers ──────────────────────────────────────────────
+
+def _download_csv(sb: Client, path: str) -> pd.DataFrame:
+    """Baixa um arquivo do Storage e retorna como DataFrame (dtype=str)."""
+    raw: bytes = sb.storage.from_(BUCKET).download(path)
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return pd.read_csv(
+                io.BytesIO(raw),
+                sep=None,
+                engine="python",
+                encoding=encoding,
+                dtype=str,
+                on_bad_lines="skip",
+                low_memory=False,
+            )
+        except Exception:
+            continue
+    raise ValueError(f"Não foi possível parsear CSV: {path}")
+
+
+def _parse_float_col(series: pd.Series) -> pd.Series:
+    """Parse de coluna numérica: aceita formato pt-BR (1.234,56) e padrão."""
+    s = series.astype(str).str.strip()
+    result = pd.to_numeric(s, errors="coerce")
+    na_mask = result.isna()
+    if na_mask.any():
+        br = pd.to_numeric(
+            s[na_mask]
+            .str.replace(r"\s", "", regex=True)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False),
+            errors="coerce",
+        )
+        result[na_mask] = br
+    return result.fillna(0.0)
+
+
+def _parse_date_col(series: pd.Series) -> pd.Series:
+    """Parse de coluna de data: aceita ISO (YYYY-MM-DD) e BR (DD/MM/YYYY)."""
+    s = series.astype(str).str.strip()
+    # ISO format
+    parsed = pd.to_datetime(s, format="%Y-%m-%d", errors="coerce")
+    # BR format para os que ficaram NaT
+    br_mask = parsed.isna()
+    if br_mask.any():
+        parsed[br_mask] = pd.to_datetime(s[br_mask], format="%d/%m/%Y", errors="coerce")
+    # fallback genérico
+    still_na = parsed.isna()
+    if still_na.any():
+        parsed[still_na] = pd.to_datetime(s[still_na], dayfirst=True, errors="coerce")
+    return parsed.dt.strftime("%Y-%m-%d").where(parsed.notna(), other=None)
+
+
 # ─── Background job ───────────────────────────────────────────────────
 
 def compute_job(job_id: str, session_id: str) -> None:
@@ -122,7 +170,7 @@ def compute_job(job_id: str, session_id: str) -> None:
     try:
         update_job(status="processing")
 
-        # ── 1. Parâmetros da sessão ─────────────────────────────
+        # ── 1. Parâmetros da sessão ─────────────────────────────────
         sess = (
             sb.table("fidc_sessions")
             .select("metadata")
@@ -133,19 +181,16 @@ def compute_job(job_id: str, session_id: str) -> None:
         metadata        = (sess.data or {}).get("metadata") or {}
         spread_percent  = float(metadata.get("spread_percent",  0.025))
         prazo_horizonte = int(metadata.get("prazo_horizonte",   6))
+        data_base_global = str(metadata.get("data_base", ""))
+        files_meta: list[dict] = metadata.get("files", [])
 
-        # ── 2. Listar arquivos de origem no Storage ─────────────
-        # Pasta onde os CSVs convertidos ficam após validação
-        try:
-            storage_files = sb.storage.from_(BUCKET).list(f"validados/{session_id}")
-            source_files = [
-                f["name"] for f in (storage_files or [])
-                if f.get("name") and not f["name"].startswith("fidc_resultados_")
-            ]
-        except Exception:
-            source_files = []
+        if not files_meta:
+            raise ValueError(
+                "Nenhum arquivo encontrado em fidc_sessions.metadata.files. "
+                "Certifique-se de usar a versão atualizada do frontend."
+            )
 
-        # ── 3. Tabelas de referência do banco ───────────────────
+        # ── 2. Tabelas de referência ────────────────────────────────
         indices = (
             sb.table("fidc_indices")
             .select("date,value")
@@ -168,51 +213,95 @@ def compute_job(job_id: str, session_id: str) -> None:
             .data or []
         )
 
-        # ── 4. Conta linhas totais ──────────────────────────────
-        count_resp = (
-            sb.table("fidc_session_data")
-            .select("id", count="exact")
-            .eq("session_id", session_id)
-            .limit(1)
-            .execute()
-        )
-        total = count_resp.count or 0
+        # ── 3. Baixa e parseia CSVs do Storage ──────────────────────
+        all_dfs: list[pd.DataFrame] = []
+        row_counter = 1
+
+        for file_info in files_meta:
+            file_name    = file_info.get("name", "unknown")
+            is_voltz_f   = bool(file_info.get("is_voltz", False))
+            field_mapping: dict = file_info.get("field_mapping", {})
+            paths: list[str]    = file_info.get("paths", [])
+
+            chunks: list[pd.DataFrame] = []
+            for path in paths:
+                if not path:
+                    continue
+                try:
+                    chunk_df = _download_csv(sb, path)
+                    chunks.append(chunk_df)
+                except Exception as e:
+                    print(f"[WARN] Falha ao baixar {path}: {e}")
+                    continue
+
+            if not chunks:
+                print(f"[WARN] Nenhum chunk baixado para {file_name}")
+                continue
+
+            file_df = pd.concat(chunks, ignore_index=True)
+
+            # Renomeia colunas: {internal_name: csv_col} → {csv_col: internal_name}
+            rename_map = {csv_col: internal for internal, csv_col in field_mapping.items() if csv_col}
+            file_df = file_df.rename(columns=rename_map)
+
+            # Metadados por arquivo
+            file_df["file_name"] = file_name
+            file_df["is_voltz"]  = is_voltz_f
+
+            # data_base: usa coluna do CSV se existir, senão o global da sessão
+            if "data_base" not in file_df.columns or file_df["data_base"].isna().all():
+                file_df["data_base"] = data_base_global
+
+            # base_origem: usa coluna do CSV se existir, senão o nome do arquivo
+            if "base_origem" not in file_df.columns:
+                file_df["base_origem"] = file_name
+
+            # Numeração de linhas contínua entre arquivos
+            n = len(file_df)
+            file_df["row_number"] = range(row_counter, row_counter + n)
+            row_counter += n
+
+            all_dfs.append(file_df)
+
+        if not all_dfs:
+            raise ValueError("Nenhum dado lido dos arquivos. Verifique os caminhos no metadata da sessão.")
+
+        df = pd.concat(all_dfs, ignore_index=True)
+        total = len(df)
         update_job(rows_total=total)
 
-        # ── 5. Busca TODOS os dados em lotes (I/O) → lista ─────
-        all_rows: list[dict] = []
-        page = 0
-        while len(all_rows) < total:
-            batch = (
-                sb.table("fidc_session_data")
-                .select(RAW_COLS)
-                .eq("session_id", session_id)
-                .order("row_number")
-                .range(page * FETCH_BATCH_SIZE, (page + 1) * FETCH_BATCH_SIZE - 1)
-                .execute()
-                .data or []
-            )
-            if not batch:
-                break
-            all_rows.extend(batch)
-            page += 1
-            # Progresso parcial durante a fase de leitura
-            update_job(rows_done=min(len(all_rows), total))
+        # ── 4. Coerção de tipos ─────────────────────────────────────
+        for col in ["valor_principal", "valor_nao_cedido", "valor_terceiro", "valor_cip"]:
+            if col in df.columns:
+                df[col] = _parse_float_col(df[col])
+            else:
+                df[col] = 0.0
 
-        # ── 6. Cálculo vetorizado (Pandas / NumPy) ──────────────
-        df = pd.DataFrame(all_rows)
+        for col in ["data_vencimento", "data_base"]:
+            if col in df.columns:
+                df[col] = _parse_date_col(df[col])
+
+        # is_voltz: garante booleano
+        df["is_voltz"] = df["is_voltz"].map(
+            lambda v: True if v is True or str(v).lower() in ("true", "1", "sim") else False
+        )
+
+        # ── 5. Cálculo vetorizado ───────────────────────────────────
         result_df = calculate_vectorized(
             df, indices, recovery_rates, di_pre_rates,
             spread_percent, prazo_horizonte,
         )
 
-        # ── 7. Gera CSV em memória ──────────────────────────────
-        csv_content = _build_csv(result_df)
-        bom_content = "\ufeff" + csv_content   # BOM para compatibilidade Excel
+        # ── 6. Summary para os cards do frontend ────────────────────
+        summary = compute_summary(result_df)
 
-        # ── 8. Upload para Supabase Storage ────────────────────
-        file_name    = f"fidc_resultados_{session_id}.csv"
-        storage_path = f"validados/{session_id}/{file_name}"
+        # ── 7. Gera CSV em memória ──────────────────────────────────
+        csv_content = _build_csv(result_df)
+        bom_content = "\ufeff" + csv_content   # BOM para Excel
+
+        # ── 8. Upload para Supabase Storage ────────────────────────
+        out_file_name = f"fidc_resultados_{session_id}.csv"
+        storage_path  = f"validados/{session_id}/{out_file_name}"
 
         sb.storage.from_(BUCKET).upload(
             storage_path,
@@ -225,6 +314,7 @@ def compute_job(job_id: str, session_id: str) -> None:
             status="done",
             csv_url=public_url,
             rows_done=total,
+            summary=summary,
         )
 
     except Exception as exc:
@@ -234,22 +324,16 @@ def compute_job(job_id: str, session_id: str) -> None:
 
 # ─── FastAPI app ──────────────────────────────────────────────────────
 
-# CORS origins configurados via env (ex: "https://app.vercel.app,https://staging.vercel.app")
-_CORS_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+_CORS_ORIGINS     = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 _CORS_ORIGINS_SET = set(o.strip() for o in _CORS_ORIGINS)
-_CORS_ALLOW_ALL = "*" in _CORS_ORIGINS_SET
+_CORS_ALLOW_ALL   = "*" in _CORS_ORIGINS_SET
 
-# Instância interna do FastAPI — todas as rotas são registradas aqui.
-# NÃO adicionar CORSMiddleware via add_middleware: o Starlette coloca o
-# CORSMiddleware DENTRO do ServerErrorMiddleware, então respostas 500 não
-# atravessam o wrapper de send do CORSMiddleware e saem sem CORS headers.
-_app = FastAPI(title="FIDC Compute Worker", version="2.0.0")
+_app = FastAPI(title="FIDC Compute Worker", version="3.0.0")
 
 
 def _make_cors_headers(origin: str) -> dict[str, str]:
-    """Retorna os headers CORS a serem incluídos em qualquer resposta."""
     return {
-        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Origin":  origin,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "*",
         "Vary": "Origin",
@@ -257,7 +341,6 @@ def _make_cors_headers(origin: str) -> dict[str, str]:
 
 
 def _allowed_origin(origin: str) -> str | None:
-    """Retorna a origin permitida ou None se não permitida."""
     if not origin:
         return None
     if _CORS_ALLOW_ALL or origin in _CORS_ORIGINS_SET:
@@ -267,14 +350,7 @@ def _allowed_origin(origin: str) -> str | None:
 
 @_app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """
-    Handler de exceções não-tratadas. Retorna JSON 500 com CORS headers.
-    Nota: este handler é passado ao ServerErrorMiddleware como .handler,
-    e o ServerErrorMiddleware envia a resposta pelo send raw (bypass do
-    CORSMiddleware interno). Por isso os headers CORS são adicionados
-    manualmente aqui E o CORSMiddleware externo (wrap abaixo) os reforça.
-    """
-    origin = request.headers.get("origin", "")
+    origin  = request.headers.get("origin", "")
     allowed = _allowed_origin(origin)
     headers = _make_cors_headers(allowed) if allowed else {}
     return JSONResponse(
@@ -284,7 +360,6 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-# ── Alias para registrar as rotas (decorators usam `app`) ─────────────
 app = _app
 
 
@@ -299,6 +374,7 @@ class JobStatus(BaseModel):
     rows_done:  Optional[int]   = None
     csv_url:    Optional[str]   = None
     error:      Optional[str]   = None
+    summary:    Optional[Any]   = None   # FidcSummary-compatible dict
 
 
 def _row_to_job_status(d: dict) -> JobStatus:
@@ -309,15 +385,13 @@ def _row_to_job_status(d: dict) -> JobStatus:
         rows_done  = d.get("rows_done"),
         csv_url    = d.get("csv_url"),
         error      = d.get("error_message"),
+        summary    = d.get("summary"),
     )
 
 
 @app.post("/compute", response_model=JobStatus)
 def start_compute(req: ComputeRequest, background_tasks: BackgroundTasks):
-    """
-    Dispara o cálculo vetorizado em background.
-    Retorna imediatamente com job_id para polling.
-    """
+    """Dispara o cálculo vetorizado em background. Retorna job_id para polling."""
     sb     = get_supabase()
     job_id = str(uuid.uuid4())
 
@@ -349,10 +423,7 @@ def get_job(job_id: str):
 
 @app.get("/sessions/{session_id}/job", response_model=Optional[JobStatus])
 def get_latest_session_job(session_id: str):
-    """
-    Retorna o job mais recente para uma sessão (ou null se não houver).
-    Usado pelo frontend para recuperar csv_url após navegação entre páginas.
-    """
+    """Retorna o job mais recente de uma sessão (ou null). Usado para recuperar csv_url + summary após navegação."""
     sb   = get_supabase()
     resp = (
         sb.table("fidc_compute_jobs")
@@ -372,24 +443,7 @@ def health():
     return {"ok": True}
 
 
-# ── CORS outermost wrap ────────────────────────────────────────────────
-#
-# O CORSMiddleware é aplicado FORA do FastAPI/Starlette, envolvendo o
-# objeto `app` já construído (com ServerErrorMiddleware incluído).
-# Resultado: a pilha de middleware vista pelo uvicorn é:
-#
-#   CORSMiddleware          ← envolve send ANTES de tudo
-#     └── ServerErrorMiddleware
-#           └── ExceptionMiddleware → rotas
-#
-# Assim, QUALQUER resposta — incluindo 500s gerados pelo
-# ServerErrorMiddleware — passa pelo wrapper de send do CORSMiddleware
-# e recebe os headers Access-Control-Allow-Origin corretos.
-#
-# Referência: Starlette issue #1116 — "Errors are not reported using
-# CORS middleware" (merged fix pattern).
-#
-# uvicorn main:app  →  app = CORSMiddleware(FastAPI(...))  ✓
+# ── CORSMiddleware como camada mais externa (Starlette issue #1116) ───
 app = CORSMiddleware(
     app=app,
     allow_origins=_CORS_ORIGINS,

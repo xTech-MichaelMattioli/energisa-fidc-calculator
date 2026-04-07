@@ -312,3 +312,51 @@ def calculate_vectorized(
     df["valor_justo"] = vj_bruto * (1 - desconto_aging)
 
     return df
+
+
+# ─── Summary computation ──────────────────────────────────────────────
+
+def compute_summary(df: pd.DataFrame) -> dict:
+    """
+    Computa o resumo estatístico do DataFrame resultado para os cards do frontend.
+    Retorna estrutura compatível com FidcSummary do TypeScript.
+    """
+
+    def _safe_sum(col: str) -> float:
+        return float(df[col].fillna(0).sum()) if col in df.columns else 0.0
+
+    # ── By aging ────────────────────────────────────────────────────
+    by_aging: dict = {}
+    if "aging" in df.columns:
+        for aging_val, grp in df.groupby("aging", sort=False):
+            by_aging[str(aging_val)] = {
+                "count":           int(len(grp)),
+                "valor_principal": float(grp["valor_principal"].fillna(0).sum()),
+                "valor_corrigido": float(grp["valor_corrigido"].fillna(0).sum()),
+                "valor_justo":     float(grp["valor_justo"].fillna(0).sum()),
+            }
+
+    # ── By empresa ──────────────────────────────────────────────────
+    by_empresa: dict = {}
+    if "empresa" in df.columns:
+        for emp_val, grp in df.groupby("empresa", sort=False):
+            by_empresa[str(emp_val)] = {
+                "count":           int(len(grp)),
+                "valor_principal": float(grp["valor_principal"].fillna(0).sum()),
+                "valor_corrigido": float(grp["valor_corrigido"].fillna(0).sum()),
+                "valor_justo":     float(grp["valor_justo"].fillna(0).sum()),
+            }
+
+    return {
+        "total_rows":               int(len(df)),
+        "total_valor_principal":    _safe_sum("valor_principal"),
+        "total_valor_liquido":      _safe_sum("valor_liquido"),
+        "total_multa":              _safe_sum("multa"),
+        "total_juros_moratorios":   _safe_sum("juros_moratorios"),
+        "total_correcao_monetaria": _safe_sum("correcao_monetaria"),
+        "total_valor_corrigido":    _safe_sum("valor_corrigido"),
+        "total_valor_recuperavel":  _safe_sum("valor_recuperavel"),
+        "total_valor_justo":        _safe_sum("valor_justo"),
+        "by_aging":                 by_aging,
+        "by_empresa":               by_empresa,
+    }
