@@ -257,15 +257,40 @@ export async function uploadFilesToStorage(
 
 // ─── List / Query ─────────────────────────────────────────────────
 
+/** Shape stored inside a run_id folder's _meta.json */
+export interface ChunkMeta {
+  originalName: string;
+  columns: string[];
+  isVoltz: boolean;
+  totalSize: number;
+  totalChunks: number;
+  chunkPaths: string[];
+}
+
 export interface StoredFileInfo {
   name: string;
+  /** First chunk path (or the file path for single uploads) — used as canonical key */
   path: string;
   size: number;
   createdAt: string;
+  /** Populated only for chunked uploads */
+  chunkPaths?: string[];
+  /** Full storage path to the run_id folder, e.g. para_validacao/<sid>/<run_id> */
+  runFolderPath?: string;
+  /** Column names extracted from the CSV header (chunked uploads only) */
+  columns?: string[];
+  /** Voltz detection result (chunked uploads only) */
+  isVoltz?: boolean;
 }
 
 /**
  * List files in a stage folder for the current session.
+ *
+ * Handles two storage layouts:
+ *   • Single file  → para_validacao/<sid>/file.csv
+ *   • Chunked file → para_validacao/<sid>/<run_id>/chunk_001.csv  +  _meta.json
+ *
+ * For chunked uploads, reads _meta.json and returns a single logical entry.
  */
 export async function listSessionStageFiles(
   stage: StorageStage
@@ -275,18 +300,50 @@ export async function listSessionStageFiles(
   const prefix = `${stage}/${getSessionId()}`;
   const { data, error } = await supabase.storage
     .from(BUCKET)
-    .list(prefix, { limit: 100 });
+    .list(prefix, { limit: 200 });
 
   if (error || !data) return [];
 
-  return data
-    .filter((f) => f.name && !f.name.startsWith("."))
-    .map((f) => ({
-      name: f.name,
-      path: `${prefix}/${f.name}`,
-      size: f.metadata?.size ?? 0,
-      createdAt: f.created_at,
-    }));
+  const results: StoredFileInfo[] = [];
+
+  for (const item of data) {
+    if (!item.name || item.name.startsWith(".") || item.name.startsWith("_")) continue;
+
+    if (!item.id) {
+      // Supabase returns virtual "folder" entries (no id) — these are run_id subfolders
+      const runFolderPath = `${prefix}/${item.name}`;
+      const metaPath = `${runFolderPath}/_meta.json`;
+
+      try {
+        const { data: metaBlob } = await supabase.storage.from(BUCKET).download(metaPath);
+        if (!metaBlob) continue;
+        const meta: ChunkMeta = JSON.parse(await metaBlob.text());
+
+        results.push({
+          name: meta.originalName,
+          path: meta.chunkPaths[0],   // first chunk = canonical key for dedup
+          size: meta.totalSize,
+          createdAt: item.created_at ?? "",
+          chunkPaths: meta.chunkPaths,
+          runFolderPath,
+          columns: meta.columns,
+          isVoltz: meta.isVoltz,
+        });
+      } catch {
+        // Malformed or missing manifest — skip silently
+      }
+    } else {
+      // Regular single-file upload
+      results.push({
+        name: item.name,
+        path: `${prefix}/${item.name}`,
+        size: item.metadata?.size ?? 0,
+        createdAt: item.created_at ?? "",
+      });
+    }
+  }
+
+  return results;
 }
 
 /** @deprecated — use listSessionStageFiles */
@@ -334,12 +391,75 @@ export async function moveToValidados(storagePath: string): Promise<string> {
   return destPath;
 }
 
+// ─── Upload to explicit path ──────────────────────────────────────
+
+/**
+ * Upload a raw buffer to any explicit path in the `temp` bucket.
+ * Used for chunked CSV uploads where the caller controls the full path.
+ */
+export async function uploadBlobToPath(
+  buffer: ArrayBuffer,
+  storagePath: string,
+  contentType = "application/octet-stream"
+): Promise<void> {
+  if (!isSupabaseConfigured() || !supabase) {
+    throw new Error("Supabase não configurado.");
+  }
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(storagePath, buffer, { contentType, upsert: true });
+  if (error) throw new Error(`Upload falhou (${storagePath}): ${error.message}`);
+}
+
+/**
+ * Upload the computed CSV results to validados/<sessionId>/fidc_resultados.csv
+ * Returns the public URL for download.
+ */
+export async function uploadComputedCsv(
+  sessionId: string,
+  csvBlob: Blob
+): Promise<string> {
+  if (!isSupabaseConfigured() || !supabase) {
+    throw new Error("Supabase não configurado.");
+  }
+
+  const fileName = `fidc_resultados_${sessionId}.csv`;
+  const storagePath = `validados/${sessionId}/${fileName}`;
+
+  const buffer = await csvBlob.arrayBuffer();
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(storagePath, buffer, {
+      contentType: "text/csv;charset=utf-8",
+      upsert: true
+    });
+
+  if (error) throw new Error(`Upload CSV falhou: ${error.message}`);
+
+  const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
+  return urlData.publicUrl;
+}
+
 // ─── Delete ───────────────────────────────────────────────────────
 
 export async function deleteFileFromStorage(path: string): Promise<void> {
   if (!isSupabaseConfigured() || !supabase) return;
   const { error } = await supabase.storage.from(BUCKET).remove([path]);
   if (error) throw new Error(`Erro ao remover arquivo: ${error.message}`);
+}
+
+/**
+ * Delete an entire run_id folder (chunks + manifest) in one pass.
+ */
+export async function deleteRunFolder(runFolderPath: string): Promise<void> {
+  if (!isSupabaseConfigured() || !supabase) return;
+  const { data } = await supabase.storage
+    .from(BUCKET)
+    .list(runFolderPath, { limit: 200 });
+  if (data && data.length > 0) {
+    const paths = data.map((f) => `${runFolderPath}/${f.name}`);
+    await supabase.storage.from(BUCKET).remove(paths);
+  }
 }
 
 export async function clearSessionFolder(folder: StorageFolder | StorageStage): Promise<void> {
