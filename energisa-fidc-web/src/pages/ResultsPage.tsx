@@ -9,8 +9,7 @@
  *   2. Aging               – dias_atraso, aging, aging_taxa
  *   3. Correção Monetária  – VL, multa, juros_moratórios, fator_correção,
  *                            correção_monetária, VC, juros_remuneratórios, SDV
- *   4. Valor Justo         – taxa_recuperação, prazo, V.recuperável, VJ,
- *                            desconto_aging, VJR
+ *   4. Valor Justo         – taxa_recuperação, prazo, V.recuperável, Valor Justo
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useApp } from "@/context/AppContext";
@@ -20,6 +19,8 @@ import {
   getAllResultsForExport,
   getSummary,
   getCurrentSessionId,
+  getLatestSessionJob,
+  isWorkerConfigured,
 } from "@/services";
 import type { FidcSummary, SessionDataRow } from "@/services";
 import { isSupabaseConfigured } from "@/lib/supabase";
@@ -108,9 +109,7 @@ const DB_COLUMNS: ColDef[] = [
   { key: "taxa_recuperacao", label: "Taxa Recup.", group: "vj", align: "right", fmt: fmtPct },
   { key: "prazo_recebimento", label: "Prazo (meses)", group: "vj", align: "right", fmt: fmtNum },
   { key: "valor_recuperavel", label: "V.Recuperável (R$)", group: "vj", align: "right", fmt: fmtBRL },
-  { key: "valor_justo", label: "VJ (R$)", group: "vj", align: "right", fmt: fmtBRL },
-  { key: "desconto_aging", label: "Desc. Aging", group: "vj", align: "right", fmt: fmtPct },
-  { key: "valor_justo_reajustado", label: "VJR (R$)", group: "vj", align: "right", fmt: fmtBRL },
+  { key: "valor_justo", label: "Valor Justo (R$)", group: "vj", align: "right", fmt: fmtBRL },
 ];
 
 const GROUP_COLORS: Record<string, string> = {
@@ -163,8 +162,6 @@ const CSV_HEADERS: Record<string, string> = {
   prazo_recebimento: "Prazo Recebimento (meses)",
   valor_recuperavel: "Valor Recuperável (R$)",
   valor_justo: "Valor Justo (R$)",
-  desconto_aging: "Desconto Aging (%)",
-  valor_justo_reajustado: "Valor Justo Reajustado (R$)",
 };
 
 const CSV_KEY_ORDER = DB_COLUMNS.map((c) => c.key);
@@ -291,6 +288,8 @@ export function ResultsPage() {
     setCurrentStep,
     dbSessionId,
     processedAt,
+    workerCsvUrl,
+    setWorkerCsvUrl,
   } = useApp();
 
   const useDb = isSupabaseConfigured() && !!dbSessionId;
@@ -331,6 +330,17 @@ export function ResultsPage() {
     }
   }, [useDb, dbSessionId, loadPage]);
 
+  // ── Recupera csv_url do worker se perdido na navegação ──
+  useEffect(() => {
+    if (!workerCsvUrl && dbSessionId && isWorkerConfigured()) {
+      getLatestSessionJob(dbSessionId).then((job) => {
+        if (job?.status === "done" && job.csv_url) {
+          setWorkerCsvUrl(job.csv_url);
+        }
+      }).catch(() => {});
+    }
+  }, [dbSessionId, workerCsvUrl, setWorkerCsvUrl]);
+
   // ── Local-mode metrics ──
   const localMetrics = useMemo(() => {
     if (useDb || !results.length) return null;
@@ -339,10 +349,6 @@ export function ResultsPage() {
       totalPrincipal: results.reduce((s, r) => s + (r.valor_principal || 0), 0),
       totalCorrigido: results.reduce((s, r) => s + (r.valor_corrigido || 0), 0),
       totalJusto: results.reduce((s, r) => s + (r.valor_justo || 0), 0),
-      totalReajustado: results.reduce(
-        (s, r) => s + (r.valor_justo_reajustado ?? r.valor_justo ?? 0),
-        0
-      ),
     };
   }, [useDb, results]);
 
@@ -437,7 +443,7 @@ export function ResultsPage() {
             </div>
           )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <Button
             variant="outline"
             onClick={() => setCurrentStep(3)}
@@ -446,18 +452,33 @@ export function ResultsPage() {
             <RefreshCw className="w-4 h-4" />
             Reprocessar
           </Button>
-          <Button
-            onClick={useDb ? handleExportDb : handleExportLocal}
-            disabled={exporting}
-            className="gap-2"
-          >
-            {exporting ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Download className="w-4 h-4" />
-            )}
-            {exporting ? "Exportando..." : "Exportar CSV Completo"}
-          </Button>
+
+          {/* Botão primário: CSV gerado pelo worker no Storage (direto, sem espera) */}
+          {workerCsvUrl ? (
+            <Button
+              asChild
+              className="gap-2 bg-emerald-600 hover:bg-emerald-700"
+            >
+              <a href={workerCsvUrl} download>
+                <Download className="w-4 h-4" />
+                Download CSV (Storage)
+              </a>
+            </Button>
+          ) : (
+            /* Fallback: gera CSV client-side buscando tudo do banco */
+            <Button
+              onClick={useDb ? handleExportDb : handleExportLocal}
+              disabled={exporting}
+              className="gap-2"
+            >
+              {exporting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              {exporting ? "Exportando..." : "Exportar CSV Completo"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -512,8 +533,8 @@ export function ResultsPage() {
             delay={0.1}
           />
           <MetricCard
-            label="Valor Justo Reaj."
-            value={formatBRL(summary.total_valor_justo_reajustado)}
+            label="Valor Justo"
+            value={formatBRL(summary.total_valor_justo)}
             icon={<BarChart3 className="w-5 h-5" />}
             color="bg-purple-100 text-purple-600"
             delay={0.15}
@@ -543,8 +564,8 @@ export function ResultsPage() {
             delay={0.1}
           />
           <MetricCard
-            label="Valor Justo Reaj."
-            value={formatBRL(localMetrics.totalReajustado)}
+            label="Valor Justo"
+            value={formatBRL(localMetrics.totalJusto)}
             icon={<BarChart3 className="w-5 h-5" />}
             color="bg-purple-100 text-purple-600"
             delay={0.15}
@@ -657,7 +678,7 @@ export function ResultsPage() {
                               ? String(raw)
                               : "";
                             const isVjr =
-                              col.key === "valor_justo_reajustado";
+                              col.key === "valor_justo";
                             return (
                               <td
                                 key={col.key}
@@ -777,8 +798,7 @@ function LocalResultsTable({
     { key: "correcao_monetaria", label: "Correção (R$)", fmt: (v) => formatBRL(v as number) },
     { key: "valor_corrigido", label: "VC (R$)", fmt: (v) => formatBRL(v as number) },
     { key: "taxa_recuperacao", label: "Taxa Rec.", fmt: (v) => `${((v as number) * 100).toFixed(1)}%` },
-    { key: "valor_justo", label: "VJ (R$)", fmt: (v) => formatBRL(v as number) },
-    { key: "valor_justo_reajustado", label: "VJR (R$)", fmt: (v) => formatBRL(v as number) },
+    { key: "valor_justo", label: "Valor Justo (R$)", fmt: (v) => formatBRL(v as number) },
   ];
 
   const sorted = useMemo(() => {

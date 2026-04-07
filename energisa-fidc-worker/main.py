@@ -13,8 +13,9 @@ from typing import Literal, Optional
 
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
 
@@ -233,14 +234,58 @@ def compute_job(job_id: str, session_id: str) -> None:
 
 # ─── FastAPI app ──────────────────────────────────────────────────────
 
-app = FastAPI(title="FIDC Compute Worker", version="2.0.0")
+# CORS origins configurados via env (ex: "https://app.vercel.app,https://staging.vercel.app")
+_CORS_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+_CORS_ORIGINS_SET = set(o.strip() for o in _CORS_ORIGINS)
+_CORS_ALLOW_ALL = "*" in _CORS_ORIGINS_SET
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.environ.get("ALLOWED_ORIGINS", "*").split(","),
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+# Instância interna do FastAPI — todas as rotas são registradas aqui.
+# NÃO adicionar CORSMiddleware via add_middleware: o Starlette coloca o
+# CORSMiddleware DENTRO do ServerErrorMiddleware, então respostas 500 não
+# atravessam o wrapper de send do CORSMiddleware e saem sem CORS headers.
+_app = FastAPI(title="FIDC Compute Worker", version="2.0.0")
+
+
+def _make_cors_headers(origin: str) -> dict[str, str]:
+    """Retorna os headers CORS a serem incluídos em qualquer resposta."""
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Vary": "Origin",
+    }
+
+
+def _allowed_origin(origin: str) -> str | None:
+    """Retorna a origin permitida ou None se não permitida."""
+    if not origin:
+        return None
+    if _CORS_ALLOW_ALL or origin in _CORS_ORIGINS_SET:
+        return origin
+    return None
+
+
+@_app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Handler de exceções não-tratadas. Retorna JSON 500 com CORS headers.
+    Nota: este handler é passado ao ServerErrorMiddleware como .handler,
+    e o ServerErrorMiddleware envia a resposta pelo send raw (bypass do
+    CORSMiddleware interno). Por isso os headers CORS são adicionados
+    manualmente aqui E o CORSMiddleware externo (wrap abaixo) os reforça.
+    """
+    origin = request.headers.get("origin", "")
+    allowed = _allowed_origin(origin)
+    headers = _make_cors_headers(allowed) if allowed else {}
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers=headers,
+    )
+
+
+# ── Alias para registrar as rotas (decorators usam `app`) ─────────────
+app = _app
 
 
 class ComputeRequest(BaseModel):
@@ -325,3 +370,30 @@ def get_latest_session_job(session_id: str):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# ── CORS outermost wrap ────────────────────────────────────────────────
+#
+# O CORSMiddleware é aplicado FORA do FastAPI/Starlette, envolvendo o
+# objeto `app` já construído (com ServerErrorMiddleware incluído).
+# Resultado: a pilha de middleware vista pelo uvicorn é:
+#
+#   CORSMiddleware          ← envolve send ANTES de tudo
+#     └── ServerErrorMiddleware
+#           └── ExceptionMiddleware → rotas
+#
+# Assim, QUALQUER resposta — incluindo 500s gerados pelo
+# ServerErrorMiddleware — passa pelo wrapper de send do CORSMiddleware
+# e recebe os headers Access-Control-Allow-Origin corretos.
+#
+# Referência: Starlette issue #1116 — "Errors are not reported using
+# CORS middleware" (merged fix pattern).
+#
+# uvicorn main:app  →  app = CORSMiddleware(FastAPI(...))  ✓
+app = CORSMiddleware(
+    app=app,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)

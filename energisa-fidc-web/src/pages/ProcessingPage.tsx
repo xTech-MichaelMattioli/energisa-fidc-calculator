@@ -1,12 +1,10 @@
 /**
  * Page 4: Processing
- * Multi-step FIDC calculation pipeline with DB persistence.
+ * FIDC pipeline with DB persistence.
  *
  * Steps:
- *   1. Ingestão de Dados   – CSV → DB table (via edge function)
- *   2. Cálculo de Aging    – dias_atraso + classificação (SQL)
- *   3. Correção Monetária  – multa, juros, correção, valor_corrigido (SQL)
- *   4. Valor Justo & RV    – taxa recuperação, VJ, desconto, VJR (SQL)
+ *   1. Ingestão de Dados – CSV → fidc_session_data (via edge function)
+ *   Results computed on-the-fly via vw_fidc_results view.
  *
  * After completion, shows summary cards + paginated results table.
  */
@@ -17,12 +15,16 @@ import {
   getSummary,
   getResults,
   runPipeline,
+  triggerComputeJob,
+  waitForJob,
+  isWorkerConfigured,
 } from "@/services";
 import type {
   FidcSummary,
   SessionDataRow,
   ProcessingDbStep,
   ProcessingDbProgress,
+  WorkerJobStatus,
 } from "@/services";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { Card, CardContent } from "@/components/ui/card";
@@ -38,13 +40,13 @@ import {
   Loader2,
   AlertCircle,
   Database,
-  Calculator,
-  BarChart3,
   Sparkles,
   Table2,
   ChevronLeft,
   ChevronRight,
   Zap,
+  BarChart3,
+  Download,
 } from "lucide-react";
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -73,9 +75,7 @@ interface PipelineStepDef {
 
 const PIPELINE_STEPS_UI: PipelineStepDef[] = [
   { key: "ingest", label: "Ingestão de Dados", icon: <Database className="w-4 h-4" /> },
-  { key: "aging", label: "Cálculo de Aging", icon: <BarChart3 className="w-4 h-4" /> },
-  { key: "correction", label: "Correção Monetária", icon: <Calculator className="w-4 h-4" /> },
-  { key: "fair_value", label: "Valor Justo & RV", icon: <Sparkles className="w-4 h-4" /> },
+  { key: "complete", label: "Resultados via View", icon: <Sparkles className="w-4 h-4" /> },
 ];
 
 function formatBRL(v: number | null | undefined): string {
@@ -109,6 +109,8 @@ export function ProcessingPage() {
     setCurrentStep,
     setDbSessionId,
     setProcessedAt,
+    workerCsvUrl,
+    setWorkerCsvUrl,
   } = useApp();
 
   const [progress, setProgress] = useState<ProcessingDbProgress | null>(null);
@@ -119,8 +121,11 @@ export function ProcessingPage() {
   const [resultsPage, setResultsPage] = useState(0);
   const [resultsCount, setResultsCount] = useState(0);
   const [loadingResults, setLoadingResults] = useState(false);
+  const [computePhase, setComputePhase] = useState<"idle" | "computing" | "done">("idle");
+  const [computeProgress, setComputeProgress] = useState<{ done: number; total: number } | null>(null);
 
   const stepLogRef = useRef<ProcessingDbProgress[]>([]);
+  const computeStartedRef = useRef<string | null>(null); // sessionId for which compute was started
   const PAGE_SIZE = 50;
 
   const useDbPipeline = isSupabaseConfigured();
@@ -154,11 +159,41 @@ export function ProcessingPage() {
     [uploadedFiles]
   );
 
-  // Current step index for the stepper
+  // Current step index for the stepper ("setup" maps to ingest step)
   const currentStepIdx = useMemo(() => {
     if (!progress) return -1;
-    return PIPELINE_STEPS_UI.findIndex((s) => s.key === progress.step);
+    const step = progress.step === "setup" ? "ingest" : progress.step;
+    return PIPELINE_STEPS_UI.findIndex((s) => s.key === step);
   }, [progress]);
+
+  // ── Worker compute phase ──
+  const runComputePhase = useCallback(
+    async (sid: string) => {
+      if (!isWorkerConfigured()) return;
+      setComputePhase("computing");
+      setComputeProgress(null);
+      try {
+        const jobId = await triggerComputeJob(sid);
+
+        await waitForJob(jobId, (status: WorkerJobStatus) => {
+          if (status.rows_total != null) {
+            setComputeProgress({
+              done:  status.rows_done  ?? 0,
+              total: status.rows_total ?? 0,
+            });
+          }
+          if (status.status === "done" && status.csv_url) {
+            setWorkerCsvUrl(status.csv_url);
+            setComputePhase("done");
+          }
+        });
+      } catch (err) {
+        console.error("Worker error:", err);
+        setComputePhase("idle");
+      }
+    },
+    []
+  );
 
   // ── Load results after completion ──
   const loadResults = useCallback(
@@ -183,23 +218,36 @@ export function ProcessingPage() {
     if (isDone && sessionId) {
       getSummary(sessionId).then(setSummary).catch(() => {});
       loadResults(0);
+      if (computeStartedRef.current !== sessionId) {
+        computeStartedRef.current = sessionId;
+        runComputePhase(sessionId);
+      }
     }
-  }, [isDone, sessionId, loadResults]);
+  }, [isDone, sessionId, loadResults, runComputePhase]);
 
   // ── Run pipeline ──
   const handleRun = useCallback(async () => {
     setError(null);
     setIsProcessing(true);
     stepLogRef.current = [];
+    computeStartedRef.current = null;
     setProgress(null);
     setSummary(null);
     setRowResults([]);
+    setComputePhase("idle");
+    setComputeProgress(null);
+    setWorkerCsvUrl(null);
 
     const onProgress = (p: ProcessingDbProgress) => {
       stepLogRef.current = [
         ...stepLogRef.current.filter((l) => l.step !== p.step),
         p,
       ];
+      // Capture sessionId as soon as it arrives (before pipeline may fail)
+      if (p.sessionId) {
+        setSessionId(p.sessionId);
+        setDbSessionId(p.sessionId);
+      }
       setProgress({ ...p });
     };
 
@@ -270,7 +318,7 @@ export function ProcessingPage() {
       <div>
         <h2 className="text-2xl font-bold text-foreground">Processamento</h2>
         <p className="text-muted-foreground mt-1">
-          Execute o pipeline de cálculos FIDC no banco de dados: ingestão, aging, correção monetária, valor justo e remuneração variável.
+          Ingira os arquivos CSV no banco. Os cálculos de aging, correção monetária e valor justo são gerados pelo worker Python e salvos como CSV no Storage.
         </p>
         {useDbPipeline && (
           <Badge variant="outline" className="mt-2 gap-1 bg-emerald-50 text-emerald-700 border-emerald-200">
@@ -359,7 +407,7 @@ export function ProcessingPage() {
                 <p className="text-sm font-medium">Pronto para processar</p>
                 <p className="text-xs text-muted-foreground">
                   {useDbPipeline
-                    ? "Os dados serão enviados ao banco e processados via SQL."
+                    ? "Os dados serão enviados ao banco e os cálculos executados pelo worker Python no Railway."
                     : "O cálculo será realizado localmente no navegador."}
                 </p>
               </div>
@@ -495,10 +543,6 @@ export function ProcessingPage() {
                           <AlertCircle className="w-3.5 h-3.5" />
                         ) : entry.step === "ingest" ? (
                           <Database className="w-3.5 h-3.5" />
-                        ) : entry.step === "aging" ? (
-                          <BarChart3 className="w-3.5 h-3.5" />
-                        ) : entry.step === "correction" ? (
-                          <Calculator className="w-3.5 h-3.5" />
                         ) : (
                           <Sparkles className="w-3.5 h-3.5" />
                         )}
@@ -515,6 +559,58 @@ export function ProcessingPage() {
                   ))}
                 </AnimatePresence>
               </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
+
+      {/* ── Worker Compute Phase ── */}
+      {isDone && computePhase !== "idle" && (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+          <Card className={computePhase === "done" ? "border-emerald-200 bg-emerald-50/20" : ""}>
+            <CardContent className="p-5">
+              <div className="flex items-center gap-2 mb-3">
+                {computePhase === "computing" ? (
+                  <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                )}
+                <p className="text-sm font-semibold text-foreground">
+                  {computePhase === "computing"
+                    ? "Calculando valores via worker (Railway)..."
+                    : "CSV pronto para download"}
+                </p>
+                {computeProgress && (
+                  <span className="text-xs text-muted-foreground ml-auto">
+                    {formatNumber(computeProgress.done)} / {formatNumber(computeProgress.total)} linhas
+                  </span>
+                )}
+              </div>
+              {computePhase === "computing" && computeProgress && (
+                <Progress
+                  value={
+                    computeProgress.total > 0
+                      ? (computeProgress.done / computeProgress.total) * 100
+                      : 0
+                  }
+                  className="h-2"
+                />
+              )}
+              {computePhase === "done" && workerCsvUrl && (
+                <Button
+                  size="sm"
+                  className="gap-2 mt-1"
+                  onClick={() => {
+                    const a = document.createElement("a");
+                    a.href = workerCsvUrl;
+                    a.download = `fidc_resultados_${sessionId ?? "export"}.csv`;
+                    a.click();
+                  }}
+                >
+                  <Download className="w-4 h-4" />
+                  Download CSV ({formatNumber(computeProgress?.total)} linhas)
+                </Button>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -542,9 +638,8 @@ export function ProcessingPage() {
                   <SummaryCard label="VC Total" value={formatBRL(summary.total_valor_corrigido)} accent />
                   <SummaryCard label="Multa" value={formatBRL(summary.total_multa)} />
                   <SummaryCard label="Juros Moratórios" value={formatBRL(summary.total_juros_moratorios)} />
-                  <SummaryCard label="VJ Total" value={formatBRL(summary.total_valor_justo)} accent />
+                  <SummaryCard label="Valor Justo" value={formatBRL(summary.total_valor_justo)} accent />
                   <SummaryCard label="Recuperável" value={formatBRL(summary.total_valor_recuperavel)} />
-                  <SummaryCard label="VJ Reajustado" value={formatBRL(summary.total_valor_justo_reajustado)} accent />
                 </div>
               </CardContent>
             </Card>
@@ -563,7 +658,6 @@ export function ProcessingPage() {
                           <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VP</th>
                           <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VC</th>
                           <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VJ</th>
-                          <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VJR</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -574,9 +668,6 @@ export function ProcessingPage() {
                             <td className="py-1.5 px-2 text-right">{formatBRL(data.valor_principal)}</td>
                             <td className="py-1.5 px-2 text-right">{formatBRL(data.valor_corrigido)}</td>
                             <td className="py-1.5 px-2 text-right">{formatBRL(data.valor_justo)}</td>
-                            <td className="py-1.5 px-2 text-right font-medium text-emerald-700">
-                              {formatBRL(data.valor_justo_reajustado)}
-                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -600,7 +691,6 @@ export function ProcessingPage() {
                           <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VP</th>
                           <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VC</th>
                           <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VJ</th>
-                          <th className="text-right py-1.5 px-2 font-semibold text-muted-foreground">VJR</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -614,9 +704,6 @@ export function ProcessingPage() {
                             <td className="py-1.5 px-2 text-right">{formatBRL(data.valor_principal)}</td>
                             <td className="py-1.5 px-2 text-right">{formatBRL(data.valor_corrigido)}</td>
                             <td className="py-1.5 px-2 text-right">{formatBRL(data.valor_justo)}</td>
-                            <td className="py-1.5 px-2 text-right font-medium text-emerald-700">
-                              {formatBRL(data.valor_justo_reajustado)}
-                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -658,21 +745,19 @@ export function ProcessingPage() {
                         <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">Correção</th>
                         <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">VC</th>
                         <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">TR%</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">VJ</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">Desc%</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-emerald-700">VJR</th>
+                        <th className="text-right py-1.5 px-1.5 font-semibold text-emerald-700">VJ</th>
                       </tr>
                     </thead>
                     <tbody>
                       {loadingResults ? (
                         <tr>
-                          <td colSpan={16} className="text-center py-8">
+                          <td colSpan={14} className="text-center py-8">
                             <Loader2 className="w-5 h-5 animate-spin mx-auto text-muted-foreground" />
                           </td>
                         </tr>
                       ) : rowResults.length === 0 ? (
                         <tr>
-                          <td colSpan={16} className="text-center py-8 text-muted-foreground">
+                          <td colSpan={14} className="text-center py-8 text-muted-foreground">
                             Nenhum resultado
                           </td>
                         </tr>
@@ -697,13 +782,7 @@ export function ProcessingPage() {
                             <td className="py-1 px-1.5 text-right">
                               {r.taxa_recuperacao != null ? `${(r.taxa_recuperacao * 100).toFixed(1)}%` : "-"}
                             </td>
-                            <td className="py-1 px-1.5 text-right">{formatBRL(r.valor_justo)}</td>
-                            <td className="py-1 px-1.5 text-right">
-                              {r.desconto_aging != null ? `${(r.desconto_aging * 100).toFixed(1)}%` : "-"}
-                            </td>
-                            <td className="py-1 px-1.5 text-right font-medium text-emerald-700">
-                              {formatBRL(r.valor_justo_reajustado)}
-                            </td>
+                            <td className="py-1 px-1.5 text-right font-medium text-emerald-700">{formatBRL(r.valor_justo)}</td>
                           </tr>
                         ))
                       )}
@@ -757,10 +836,17 @@ export function ProcessingPage() {
                 <div>
                   <p className="text-sm font-medium text-red-800">Erro no processamento</p>
                   <p className="text-xs text-red-600 mt-1 whitespace-pre-wrap">{error}</p>
-                  <Button variant="destructive" size="sm" className="mt-3 gap-2" onClick={handleRun}>
-                    <Play className="w-3.5 h-3.5" />
-                    Tentar Novamente
-                  </Button>
+                  <div className="flex items-center gap-2 mt-3 flex-wrap">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      className="gap-2"
+                      onClick={handleRun}
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      Tentar Novamente
+                    </Button>
+                  </div>
                 </div>
               </CardContent>
             </Card>

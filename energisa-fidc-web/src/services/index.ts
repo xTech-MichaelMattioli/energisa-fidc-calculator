@@ -13,5 +13,7 @@ export { callValidateExcel, callExtractColumns, validateAndExtractColumns, callR
 export type { ValidateExcelResult, ExtractColumnsResult, ColumnInfo, DetectedColumnType, ReadColumnsResult } from "./edge-functions.service";
 export { validateFile, validateFiles } from "./validation-processor.service";
 export type { ValidationOutcome, ValidationStepCallback } from "./validation-processor.service";
-export { runFullDbPipeline, getSummary, getResults, getAllResultsForExport } from "./processing-db.service";
-export type { ProcessingDbStep, ProcessingDbProgress, ProcessingDbCallback, FidcSummary, SessionDataRow } from "./processing-db.service";
+export { runFullDbPipeline, getSummary, getResults, getAllResultsForExport, getRawRowsBatch } from "./processing-db.service";
+export type { ProcessingDbStep, ProcessingDbProgress, ProcessingDbCallback, FidcSummary, SessionDataRow, RawDataRow } from "./processing-db.service";
+export { triggerComputeJob, getJobStatus, waitForJob, isWorkerConfigured, getLatestSessionJob } from "./compute-worker.service";
+export type { WorkerJobStatus } from "./compute-worker.service";

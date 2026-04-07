@@ -44,6 +44,8 @@ interface AppState {
   setDbSessionId: (id: string | null) => void;
   processedAt: string | null;
   setProcessedAt: (d: string | null) => void;
+  workerCsvUrl: string | null;
+  setWorkerCsvUrl: (url: string | null) => void;
 
   // Step 5: Results
   results: FinalRecord[];
@@ -65,6 +67,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
   const [processedAt, setProcessedAt] = useState<string | null>(null);
+  const [workerCsvUrl, setWorkerCsvUrl] = useState<string | null>(null);
   const [results, setResults] = useState<FinalRecord[]>([]);
 
   return (
@@ -82,6 +85,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         isProcessing, setIsProcessing,
         dbSessionId, setDbSessionId,
         processedAt, setProcessedAt,
+        workerCsvUrl, setWorkerCsvUrl,
         results, setResults,
       }}
     >
