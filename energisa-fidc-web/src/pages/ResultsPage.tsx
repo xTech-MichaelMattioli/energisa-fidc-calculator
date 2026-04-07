@@ -17,7 +17,6 @@ import {
   exportToCSV,
   getResults,
   getAllResultsForExport,
-  getSummary,
   getCurrentSessionId,
   getLatestSessionJob,
   isWorkerConfigured,
@@ -290,6 +289,8 @@ export function ResultsPage() {
     processedAt,
     workerCsvUrl,
     setWorkerCsvUrl,
+    workerSummary,
+    setWorkerSummary,
   } = useApp();
 
   const useDb = isSupabaseConfigured() && !!dbSessionId;
@@ -299,7 +300,6 @@ export function ResultsPage() {
   const [dbCount, setDbCount] = useState(0);
   const [dbPage, setDbPage] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [summary, setSummary] = useState<FidcSummary | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
 
@@ -322,24 +322,25 @@ export function ResultsPage() {
     [dbSessionId]
   );
 
-  // ── Initial load ──
+  // ── Initial load (só carrega tabela paginada se houver dados no DB) ──
   useEffect(() => {
     if (useDb && dbSessionId) {
       loadPage(0);
-      getSummary(dbSessionId).then(setSummary).catch(() => {});
     }
   }, [useDb, dbSessionId, loadPage]);
 
-  // ── Recupera csv_url do worker se perdido na navegação ──
+  // ── Recupera csv_url + summary do worker se perdidos na navegação ──
   useEffect(() => {
-    if (!workerCsvUrl && dbSessionId && isWorkerConfigured()) {
+    const missing = !workerCsvUrl || !workerSummary;
+    if (missing && dbSessionId && isWorkerConfigured()) {
       getLatestSessionJob(dbSessionId).then((job) => {
-        if (job?.status === "done" && job.csv_url) {
-          setWorkerCsvUrl(job.csv_url);
+        if (job?.status === "done") {
+          if (job.csv_url  && !workerCsvUrl)  setWorkerCsvUrl(job.csv_url);
+          if (job.summary  && !workerSummary) setWorkerSummary(job.summary as FidcSummary);
         }
       }).catch(() => {});
     }
-  }, [dbSessionId, workerCsvUrl, setWorkerCsvUrl]);
+  }, [dbSessionId, workerCsvUrl, workerSummary, setWorkerCsvUrl, setWorkerSummary]);
 
   // ── Local-mode metrics ──
   const localMetrics = useMemo(() => {
@@ -395,8 +396,8 @@ export function ResultsPage() {
     ? Math.ceil(dbCount / PAGE_SIZE)
     : Math.ceil(results.length / PAGE_SIZE);
 
-  // ── Empty state ──
-  if (!useDb && !results.length) {
+  // ── Empty state — só mostra se não há NADA (sem DB, sem resultado local, sem worker) ──
+  if (!useDb && !results.length && !workerCsvUrl && !workerSummary) {
     return (
       <motion.div
         initial={{ opacity: 0 }}
@@ -509,32 +510,33 @@ export function ResultsPage() {
       </AnimatePresence>
 
       {/* ── Metric cards ── */}
-      {useDb && summary ? (
+      {/* Prioridade: workerSummary (Railway) > localMetrics (browser) */}
+      {workerSummary ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <MetricCard
             label="Total Registros"
-            value={formatNumber(summary.total_rows, 0)}
+            value={formatNumber(workerSummary.total_rows, 0)}
             icon={<FileSpreadsheet className="w-5 h-5" />}
             color="bg-blue-100 text-blue-600"
             delay={0}
           />
           <MetricCard
             label="Valor Principal"
-            value={formatBRL(summary.total_valor_principal)}
+            value={formatBRL(workerSummary.total_valor_principal)}
             icon={<DollarSign className="w-5 h-5" />}
             color="bg-emerald-100 text-emerald-600"
             delay={0.05}
           />
           <MetricCard
             label="Valor Corrigido"
-            value={formatBRL(summary.total_valor_corrigido)}
+            value={formatBRL(workerSummary.total_valor_corrigido)}
             icon={<TrendingUp className="w-5 h-5" />}
             color="bg-amber-100 text-amber-600"
             delay={0.1}
           />
           <MetricCard
             label="Valor Justo"
-            value={formatBRL(summary.total_valor_justo)}
+            value={formatBRL(workerSummary.total_valor_justo)}
             icon={<BarChart3 className="w-5 h-5" />}
             color="bg-purple-100 text-purple-600"
             delay={0.15}

@@ -14,6 +14,6 @@ export type { ValidateExcelResult, ExtractColumnsResult, ColumnInfo, DetectedCol
 export { validateFile, validateFiles } from "./validation-processor.service";
 export type { ValidationOutcome, ValidationStepCallback } from "./validation-processor.service";
 export { runFullDbPipeline, getSummary, getResults, getAllResultsForExport, getRawRowsBatch } from "./processing-db.service";
-export type { ProcessingDbStep, ProcessingDbProgress, ProcessingDbCallback, FidcSummary, SessionDataRow, RawDataRow } from "./processing-db.service";
+export type { ProcessingDbStep, ProcessingDbProgress, ProcessingDbCallback, FidcSummary, SessionDataRow, RawDataRow, SessionFileMeta } from "./processing-db.service";
 export { triggerComputeJob, getJobStatus, waitForJob, isWorkerConfigured, getLatestSessionJob } from "./compute-worker.service";
 export type { WorkerJobStatus } from "./compute-worker.service";

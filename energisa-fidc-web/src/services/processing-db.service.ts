@@ -106,6 +106,21 @@ export interface SessionDataRow {
   valor_justo: number;
 }
 
+/**
+ * Informações de um arquivo que o worker precisa para baixar e parsear do Storage.
+ * Armazenado em fidc_sessions.metadata.files[].
+ */
+export interface SessionFileMeta {
+  /** Nome original do arquivo */
+  name: string;
+  /** Se pertence à empresa VOLTZ */
+  is_voltz: boolean;
+  /** Mapeamento de campos: { campo_interno: coluna_csv } */
+  field_mapping: FieldMapping;
+  /** Paths no Storage onde os chunks (ou arquivo único) estão */
+  paths: string[];
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────
 
 function requireSupabase() {
@@ -120,7 +135,8 @@ function requireSupabase() {
 export async function createSession(
   dataBase: string,
   spreadPercent: number = 0.025,
-  prazoHorizonte: number = 6
+  prazoHorizonte: number = 6,
+  files: SessionFileMeta[] = []
 ): Promise<string> {
   const sb = requireSupabase();
   const sessionId = getCurrentSessionId();
@@ -130,7 +146,12 @@ export async function createSession(
     data_base: dataBase,
     status: "active",
     updated_at: new Date().toISOString(),
-    metadata: { spread_percent: spreadPercent, prazo_horizonte: prazoHorizonte },
+    metadata: {
+      spread_percent:  spreadPercent,
+      prazo_horizonte: prazoHorizonte,
+      data_base:       dataBase,
+      files,           // worker lê daqui para baixar os CSVs do Storage
+    },
   });
 
   if (error) throw new Error(`Erro ao criar sessão: ${error.message}`);
@@ -393,6 +414,17 @@ export async function getRawRowsBatch(
 
 // ─── Full Pipeline Orchestrator ───────────────────────────────────
 
+/**
+ * Pipeline simplificado — sem ingest no Supabase.
+ *
+ * Apenas:
+ *   1. Cria sessão com paths dos arquivos no metadata (worker lê daqui)
+ *   2. Faz upload das tabelas de referência (índices, taxas, DI-PRE)
+ *   3. Marca sessão como "completed" (worker fica responsável pelo cálculo)
+ *
+ * O worker Railway lê os CSVs do Storage diretamente usando os paths
+ * armazenados em fidc_sessions.metadata.files[].
+ */
 export async function runFullDbPipeline(
   files: UploadedFile[],
   fieldMappings: Record<string, FieldMapping>,
@@ -404,64 +436,50 @@ export async function runFullDbPipeline(
   spreadPercent: number = 0.025,
   prazoHorizonte: number = 6
 ): Promise<string> {
-  // Step 0: Session + reference data
-  onProgress({
-    step: "setup",
-    progress: 2,
-    message: "Criando sessão no banco de dados...",
-  });
-  const sessionId = await createSession(dataBase, spreadPercent, prazoHorizonte);
+  // ── Monta lista de arquivos para o worker ─────────────────────────
+  const validFiles = files.filter(
+    (f) =>
+      f.validationStatus === "valid" &&
+      (f.chunkPaths?.length || f.csvPath || f.storagePath)
+  );
 
+  const sessionFiles: SessionFileMeta[] = validFiles
+    .map((f) => ({
+      name:          f.name,
+      is_voltz:      f.isVoltz,
+      field_mapping: fieldMappings[f.id] ?? {},
+      paths:         f.chunkPaths?.length
+        ? f.chunkPaths
+        : [f.csvPath ?? f.storagePath ?? ""].filter(Boolean),
+    }))
+    .filter((f) => f.paths.length > 0);
+
+  // ── Step 0: Cria sessão com file info no metadata ─────────────────
   onProgress({
     step: "setup",
     progress: 5,
-    message: "Sessão criada...",
-    sessionId,
+    message: "Criando sessão e registrando arquivos...",
   });
+  const sessionId = await createSession(dataBase, spreadPercent, prazoHorizonte, sessionFiles);
 
   onProgress({
     step: "setup",
-    progress: 8,
+    progress: 10,
+    message: "Sessão criada.",
+    sessionId,
+    details: `${sessionFiles.length} arquivo(s) registrado(s) para processamento`,
+  });
+
+  // ── Step 1: Upload das tabelas de referência ──────────────────────
+  onProgress({
+    step: "setup",
+    progress: 30,
     message: "Enviando índices e taxas de referência...",
-    details: `${indices.length} índices, ${recoveryRates.length} taxas recuperação, ${diPreRates.length} pontos DI-PRE`,
+    details: `${indices.length} índices  •  ${recoveryRates.length} taxas recuperação  •  ${diPreRates.length} pontos DI-PRE`,
   });
   await uploadReferenceData(sessionId, indices, recoveryRates, diPreRates);
 
-  // Step 1: Ingest files
-  let totalInserted = 0;
-  const validFiles = files.filter(
-    (f) => f.validationStatus === "valid" && (f.csvPath || f.storagePath)
-  );
-
-  for (let i = 0; i < validFiles.length; i++) {
-    const file = validFiles[i];
-    const mapping = fieldMappings[file.id] ?? {};
-
-    const fileProgressStart = 10 + (i / validFiles.length) * 85;
-    const fileProgressEnd   = 10 + ((i + 1) / validFiles.length) * 85;
-
-    onProgress({
-      step: "ingest",
-      progress: fileProgressStart,
-      message: `Ingestão: ${file.name}`,
-      details: `Arquivo ${i + 1} de ${validFiles.length}`,
-    });
-
-    const inserted = await ingestFile(sessionId, file, mapping, dataBase,
-      (chunksCompleted, chunksTotal) => {
-        const chunkFraction = chunksCompleted / chunksTotal;
-        onProgress({
-          step: "ingest",
-          progress: fileProgressStart + chunkFraction * (fileProgressEnd - fileProgressStart),
-          message: `Ingestão: ${file.name}`,
-          details: `${chunksCompleted}/${chunksTotal} chunks  •  Arquivo ${i + 1} de ${validFiles.length}`,
-        });
-      }
-    );
-    totalInserted += inserted;
-  }
-
-  // Mark session complete
+  // ── Marca sessão como pronta ──────────────────────────────────────
   const sb = requireSupabase();
   await sb
     .from("fidc_sessions")
@@ -471,8 +489,8 @@ export async function runFullDbPipeline(
   onProgress({
     step: "complete",
     progress: 100,
-    message: "Processamento concluído! Calculando resultados...",
-    details: `${totalInserted.toLocaleString("pt-BR")} registros carregados`,
+    message: "Preparação concluída! Worker Railway iniciando cálculo...",
+    details: `${validFiles.reduce((a, f) => a + f.rowCount, 0).toLocaleString("pt-BR")} registros estimados`,
   });
 
   return sessionId;

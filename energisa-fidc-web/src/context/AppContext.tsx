@@ -8,6 +8,7 @@ import type {
   DIPRERate,
   ProcessingProgress,
 } from "@/types";
+import type { FidcSummary } from "@/services/processing-db.service";
 import { createContext, useContext, useState, type ReactNode, type Dispatch, type SetStateAction } from "react";
 
 interface AppState {
@@ -46,6 +47,8 @@ interface AppState {
   setProcessedAt: (d: string | null) => void;
   workerCsvUrl: string | null;
   setWorkerCsvUrl: (url: string | null) => void;
+  workerSummary: FidcSummary | null;
+  setWorkerSummary: (s: FidcSummary | null) => void;
 
   // Step 5: Results
   results: FinalRecord[];
@@ -68,6 +71,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
   const [processedAt, setProcessedAt] = useState<string | null>(null);
   const [workerCsvUrl, setWorkerCsvUrl] = useState<string | null>(null);
+  const [workerSummary, setWorkerSummary] = useState<FidcSummary | null>(null);
   const [results, setResults] = useState<FinalRecord[]>([]);
 
   return (
@@ -86,6 +90,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dbSessionId, setDbSessionId,
         processedAt, setProcessedAt,
         workerCsvUrl, setWorkerCsvUrl,
+        workerSummary, setWorkerSummary,
         results, setResults,
       }}
     >

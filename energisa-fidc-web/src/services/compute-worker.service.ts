@@ -1,17 +1,23 @@
 /**
  * Service: FIDC Compute Worker
- * Comunica com o worker Python (Railway/Render) para cálculo vetorizado server-side.
+ * Comunica com o worker Python (Railway) para cálculo vetorizado server-side.
+ * O worker lê CSVs diretamente do Supabase Storage, computa tudo e retorna
+ * csv_url + summary (FidcSummary-compatible) para os cards do frontend.
  */
+
+import type { FidcSummary } from "./processing-db.service";
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL as string | undefined;
 
 export interface WorkerJobStatus {
-  job_id: string;
-  status: "pending" | "processing" | "done" | "error";
+  job_id:     string;
+  status:     "pending" | "processing" | "done" | "error";
   rows_total: number | null;
-  rows_done: number | null;
-  csv_url: string | null;
-  error: string | null;
+  rows_done:  number | null;
+  csv_url:    string | null;
+  error:      string | null;
+  /** Summary retornado pelo worker quando status === "done" */
+  summary:    FidcSummary | null;
 }
 
 export function isWorkerConfigured(): boolean {
@@ -52,7 +58,7 @@ export async function getJobStatus(jobId: string): Promise<WorkerJobStatus> {
 
 /**
  * Retorna o job mais recente de uma sessão, ou null se não houver.
- * Permite recuperar csv_url após navegação entre páginas.
+ * Permite recuperar csv_url + summary após navegação entre páginas.
  */
 export async function getLatestSessionJob(sessionId: string): Promise<WorkerJobStatus | null> {
   if (!WORKER_URL) return null;

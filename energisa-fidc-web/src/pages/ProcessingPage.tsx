@@ -12,8 +12,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "@/context/AppContext";
 import {
   runFullDbPipeline,
-  getSummary,
-  getResults,
   runPipeline,
   triggerComputeJob,
   waitForJob,
@@ -21,7 +19,6 @@ import {
 } from "@/services";
 import type {
   FidcSummary,
-  SessionDataRow,
   ProcessingDbStep,
   ProcessingDbProgress,
   WorkerJobStatus,
@@ -42,8 +39,6 @@ import {
   Database,
   Sparkles,
   Table2,
-  ChevronLeft,
-  ChevronRight,
   Zap,
   BarChart3,
   Download,
@@ -74,8 +69,8 @@ interface PipelineStepDef {
 }
 
 const PIPELINE_STEPS_UI: PipelineStepDef[] = [
-  { key: "ingest", label: "Ingestão de Dados", icon: <Database className="w-4 h-4" /> },
-  { key: "complete", label: "Resultados via View", icon: <Sparkles className="w-4 h-4" /> },
+  { key: "ingest", label: "Preparação", icon: <Database className="w-4 h-4" /> },
+  { key: "complete", label: "Worker Railway", icon: <Sparkles className="w-4 h-4" /> },
 ];
 
 function formatBRL(v: number | null | undefined): string {
@@ -111,22 +106,18 @@ export function ProcessingPage() {
     setProcessedAt,
     workerCsvUrl,
     setWorkerCsvUrl,
+    workerSummary,
+    setWorkerSummary,
   } = useApp();
 
   const [progress, setProgress] = useState<ProcessingDbProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [summary, setSummary] = useState<FidcSummary | null>(null);
-  const [rowResults, setRowResults] = useState<SessionDataRow[]>([]);
-  const [resultsPage, setResultsPage] = useState(0);
-  const [resultsCount, setResultsCount] = useState(0);
-  const [loadingResults, setLoadingResults] = useState(false);
   const [computePhase, setComputePhase] = useState<"idle" | "computing" | "done">("idle");
   const [computeProgress, setComputeProgress] = useState<{ done: number; total: number } | null>(null);
 
   const stepLogRef = useRef<ProcessingDbProgress[]>([]);
   const computeStartedRef = useRef<string | null>(null); // sessionId for which compute was started
-  const PAGE_SIZE = 50;
 
   const useDbPipeline = isSupabaseConfigured();
   const isDone = progress?.step === "complete";
@@ -182,8 +173,9 @@ export function ProcessingPage() {
               total: status.rows_total ?? 0,
             });
           }
-          if (status.status === "done" && status.csv_url) {
-            setWorkerCsvUrl(status.csv_url);
+          if (status.status === "done") {
+            if (status.csv_url)  setWorkerCsvUrl(status.csv_url);
+            if (status.summary)  setWorkerSummary(status.summary as FidcSummary);
             setComputePhase("done");
           }
         });
@@ -192,38 +184,17 @@ export function ProcessingPage() {
         setComputePhase("idle");
       }
     },
-    []
-  );
-
-  // ── Load results after completion ──
-  const loadResults = useCallback(
-    async (page: number) => {
-      if (!sessionId) return;
-      setLoadingResults(true);
-      try {
-        const { data, count } = await getResults(sessionId, page, PAGE_SIZE);
-        setRowResults(data);
-        setResultsCount(count);
-        setResultsPage(page);
-      } catch {
-        // silent
-      } finally {
-        setLoadingResults(false);
-      }
-    },
-    [sessionId]
+    [setWorkerCsvUrl, setWorkerSummary]
   );
 
   useEffect(() => {
     if (isDone && sessionId) {
-      getSummary(sessionId).then(setSummary).catch(() => {});
-      loadResults(0);
       if (computeStartedRef.current !== sessionId) {
         computeStartedRef.current = sessionId;
         runComputePhase(sessionId);
       }
     }
-  }, [isDone, sessionId, loadResults, runComputePhase]);
+  }, [isDone, sessionId, runComputePhase]);
 
   // ── Run pipeline ──
   const handleRun = useCallback(async () => {
@@ -232,11 +203,10 @@ export function ProcessingPage() {
     stepLogRef.current = [];
     computeStartedRef.current = null;
     setProgress(null);
-    setSummary(null);
-    setRowResults([]);
     setComputePhase("idle");
     setComputeProgress(null);
     setWorkerCsvUrl(null);
+    setWorkerSummary(null);
 
     const onProgress = (p: ProcessingDbProgress) => {
       stepLogRef.current = [
@@ -318,7 +288,7 @@ export function ProcessingPage() {
       <div>
         <h2 className="text-2xl font-bold text-foreground">Processamento</h2>
         <p className="text-muted-foreground mt-1">
-          Ingira os arquivos CSV no banco. Os cálculos de aging, correção monetária e valor justo são gerados pelo worker Python e salvos como CSV no Storage.
+          Os arquivos ficam no Storage. O worker Railway lê, calcula aging / correção / valor justo e devolve o CSV pronto para download.
         </p>
         {useDbPipeline && (
           <Badge variant="outline" className="mt-2 gap-1 bg-emerald-50 text-emerald-700 border-emerald-200">
@@ -407,7 +377,7 @@ export function ProcessingPage() {
                 <p className="text-sm font-medium">Pronto para processar</p>
                 <p className="text-xs text-muted-foreground">
                   {useDbPipeline
-                    ? "Os dados serão enviados ao banco e os cálculos executados pelo worker Python no Railway."
+                    ? "Os arquivos serão enviados ao Railway worker que calculará tudo diretamente do Storage."
                     : "O cálculo será realizado localmente no navegador."}
                 </p>
               </div>
@@ -616,9 +586,9 @@ export function ProcessingPage() {
         </motion.div>
       )}
 
-      {/* ── Summary Cards (after completion) ── */}
+      {/* ── Summary Cards (após worker terminar) ── */}
       <AnimatePresence>
-        {isDone && summary && (
+        {computePhase === "done" && workerSummary && (
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -631,21 +601,21 @@ export function ProcessingPage() {
                   Resumo dos Cálculos
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-                  <SummaryCard label="Registros" value={formatNumber(summary.total_rows)} />
-                  <SummaryCard label="VP Total" value={formatBRL(summary.total_valor_principal)} accent />
-                  <SummaryCard label="VL Total" value={formatBRL(summary.total_valor_liquido)} />
-                  <SummaryCard label="Correção" value={formatBRL(summary.total_correcao_monetaria)} />
-                  <SummaryCard label="VC Total" value={formatBRL(summary.total_valor_corrigido)} accent />
-                  <SummaryCard label="Multa" value={formatBRL(summary.total_multa)} />
-                  <SummaryCard label="Juros Moratórios" value={formatBRL(summary.total_juros_moratorios)} />
-                  <SummaryCard label="Valor Justo" value={formatBRL(summary.total_valor_justo)} accent />
-                  <SummaryCard label="Recuperável" value={formatBRL(summary.total_valor_recuperavel)} />
+                  <SummaryCard label="Registros" value={formatNumber(workerSummary.total_rows)} />
+                  <SummaryCard label="VP Total" value={formatBRL(workerSummary.total_valor_principal)} accent />
+                  <SummaryCard label="VL Total" value={formatBRL(workerSummary.total_valor_liquido)} />
+                  <SummaryCard label="Correção" value={formatBRL(workerSummary.total_correcao_monetaria)} />
+                  <SummaryCard label="VC Total" value={formatBRL(workerSummary.total_valor_corrigido)} accent />
+                  <SummaryCard label="Multa" value={formatBRL(workerSummary.total_multa)} />
+                  <SummaryCard label="Juros Moratórios" value={formatBRL(workerSummary.total_juros_moratorios)} />
+                  <SummaryCard label="Valor Justo" value={formatBRL(workerSummary.total_valor_justo)} accent />
+                  <SummaryCard label="Recuperável" value={formatBRL(workerSummary.total_valor_recuperavel)} />
                 </div>
               </CardContent>
             </Card>
 
             {/* By Aging */}
-            {summary.by_aging && Object.keys(summary.by_aging).length > 0 && (
+            {workerSummary.by_aging && Object.keys(workerSummary.by_aging).length > 0 && (
               <Card>
                 <CardContent className="p-5">
                   <p className="text-sm font-semibold text-foreground mb-3">Breakdown por Aging</p>
@@ -661,7 +631,7 @@ export function ProcessingPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(summary.by_aging).map(([aging, data]) => (
+                        {Object.entries(workerSummary.by_aging).map(([aging, data]) => (
                           <tr key={aging} className="border-b border-dashed last:border-0 hover:bg-slate-50">
                             <td className="py-1.5 px-2 font-medium">{aging}</td>
                             <td className="py-1.5 px-2 text-right">{formatNumber(data.count)}</td>
@@ -678,7 +648,7 @@ export function ProcessingPage() {
             )}
 
             {/* By Empresa */}
-            {summary.by_empresa && Object.keys(summary.by_empresa).length > 0 && (
+            {workerSummary.by_empresa && Object.keys(workerSummary.by_empresa).length > 0 && (
               <Card>
                 <CardContent className="p-5">
                   <p className="text-sm font-semibold text-foreground mb-3">Breakdown por Empresa</p>
@@ -694,7 +664,7 @@ export function ProcessingPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(summary.by_empresa).map(([empresa, data]) => (
+                        {Object.entries(workerSummary.by_empresa).map(([empresa, data]) => (
                           <tr key={empresa} className="border-b border-dashed last:border-0 hover:bg-slate-50">
                             <td className="py-1.5 px-2 font-medium flex items-center gap-1">
                               {empresa === "VOLTZ" && <Zap className="w-3 h-3 text-amber-500" />}
@@ -712,116 +682,6 @@ export function ProcessingPage() {
                 </CardContent>
               </Card>
             )}
-
-            {/* ── Paginated Results Table ── */}
-            <Card>
-              <CardContent className="p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <p className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Table2 className="w-4 h-4 text-primary" />
-                    Dados Calculados (linha a linha)
-                  </p>
-                  <span className="text-xs text-muted-foreground">
-                    {resultsCount > 0
-                      ? `${resultsPage * PAGE_SIZE + 1}–${Math.min((resultsPage + 1) * PAGE_SIZE, resultsCount)} de ${formatNumber(resultsCount)}`
-                      : "Carregando..."}
-                  </span>
-                </div>
-
-                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
-                  <table className="w-full text-[11px] whitespace-nowrap">
-                    <thead className="sticky top-0 bg-white z-10">
-                      <tr className="border-b">
-                        <th className="text-left py-1.5 px-1.5 font-semibold text-muted-foreground">#</th>
-                        <th className="text-left py-1.5 px-1.5 font-semibold text-muted-foreground">Empresa</th>
-                        <th className="text-left py-1.5 px-1.5 font-semibold text-muted-foreground">Tipo</th>
-                        <th className="text-left py-1.5 px-1.5 font-semibold text-muted-foreground">Contrato</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">VP</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">VL</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">Dias</th>
-                        <th className="text-left py-1.5 px-1.5 font-semibold text-muted-foreground">Aging</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">Multa</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">Juros</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">Correção</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">VC</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-muted-foreground">TR%</th>
-                        <th className="text-right py-1.5 px-1.5 font-semibold text-emerald-700">VJ</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {loadingResults ? (
-                        <tr>
-                          <td colSpan={14} className="text-center py-8">
-                            <Loader2 className="w-5 h-5 animate-spin mx-auto text-muted-foreground" />
-                          </td>
-                        </tr>
-                      ) : rowResults.length === 0 ? (
-                        <tr>
-                          <td colSpan={14} className="text-center py-8 text-muted-foreground">
-                            Nenhum resultado
-                          </td>
-                        </tr>
-                      ) : (
-                        rowResults.map((r) => (
-                          <tr key={r.id} className="border-b border-dashed last:border-0 hover:bg-slate-50/50">
-                            <td className="py-1 px-1.5 text-muted-foreground">{r.row_number}</td>
-                            <td className="py-1 px-1.5 font-medium">
-                              {r.is_voltz && <Zap className="w-3 h-3 text-amber-500 inline mr-0.5" />}
-                              {r.empresa}
-                            </td>
-                            <td className="py-1 px-1.5">{r.tipo}</td>
-                            <td className="py-1 px-1.5">{r.contrato}</td>
-                            <td className="py-1 px-1.5 text-right">{formatBRL(r.valor_principal)}</td>
-                            <td className="py-1 px-1.5 text-right">{formatBRL(r.valor_liquido)}</td>
-                            <td className="py-1 px-1.5 text-right">{r.dias_atraso}</td>
-                            <td className="py-1 px-1.5 text-[10px]">{r.aging}</td>
-                            <td className="py-1 px-1.5 text-right">{formatBRL(r.multa)}</td>
-                            <td className="py-1 px-1.5 text-right">{formatBRL(r.juros_moratorios)}</td>
-                            <td className="py-1 px-1.5 text-right">{formatBRL(r.correcao_monetaria)}</td>
-                            <td className="py-1 px-1.5 text-right font-medium">{formatBRL(r.valor_corrigido)}</td>
-                            <td className="py-1 px-1.5 text-right">
-                              {r.taxa_recuperacao != null ? `${(r.taxa_recuperacao * 100).toFixed(1)}%` : "-"}
-                            </td>
-                            <td className="py-1 px-1.5 text-right font-medium text-emerald-700">{formatBRL(r.valor_justo)}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Pagination */}
-                {resultsCount > PAGE_SIZE && (
-                  <div className="flex items-center justify-between mt-3 pt-3 border-t">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => loadResults(resultsPage - 1)}
-                      disabled={resultsPage === 0 || loadingResults}
-                      className="gap-1"
-                    >
-                      <ChevronLeft className="w-3.5 h-3.5" />
-                      Anterior
-                    </Button>
-                    <span className="text-xs text-muted-foreground">
-                      Página {resultsPage + 1} de {Math.ceil(resultsCount / PAGE_SIZE)}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => loadResults(resultsPage + 1)}
-                      disabled={
-                        (resultsPage + 1) * PAGE_SIZE >= resultsCount || loadingResults
-                      }
-                      className="gap-1"
-                    >
-                      Próxima
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
           </motion.div>
         )}
       </AnimatePresence>
