@@ -192,18 +192,15 @@ export function calculateFairValue(
           fatorDesconto
         : 0;
 
-    // Variable remuneration discount
+    // Variable remuneration discount (remuneração variável)
     const descontoAging = REMUNERATION_DISCOUNTS[r.aging] ?? 0.5;
-    const valorJustoReajustado = valorJusto * (1 - descontoAging);
 
     return {
       ...r,
       taxa_recuperacao: taxa,
       prazo_recebimento: prazo,
       valor_recuperavel: valorRecuperavel,
-      valor_justo: valorJusto,
-      desconto_aging: descontoAging,
-      valor_justo_reajustado: valorJustoReajustado,
+      valor_justo: valorJusto * (1 - descontoAging),
     };
   });
 }

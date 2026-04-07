@@ -51,8 +51,6 @@ export interface FinalRecord extends CorrectedRecord {
   prazo_recebimento: number;
   valor_recuperavel: number;
   valor_justo: number;
-  desconto_aging?: number;
-  valor_justo_reajustado?: number;
   is_voltz?: boolean;
 }
 
@@ -152,6 +150,10 @@ export interface UploadedFile {
   processingStatus?: FileProcessingStatus;
   /** Path of the CSV in validados/ after processing */
   csvPath?: string;
+  /** For large CSVs split into 5 MB chunks — paths of each chunk in storage */
+  chunkPaths?: string[];
+  /** Storage folder that holds all chunks + _meta.json, e.g. para_validacao/<sid>/<run_id> */
+  runFolderPath?: string;
   /** Supabase temp table name holding this file's data */
   tempTable?: string;
 
