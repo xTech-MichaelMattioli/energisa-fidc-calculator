@@ -37,6 +37,9 @@ export interface ReadColumnsResult {
   sheetName?: string;
   isVoltz?: boolean;
   sampleData?: Record<string, unknown>[];
+  /** Populated when convertToCsv was requested and succeeded */
+  csvPath?: string;
+  csvSize?: number;
 }
 
 // ── Legacy types kept for backward compatibility ──────────────────
@@ -91,6 +94,36 @@ export async function callReadColumns(
   }
 
   // data is the JSON body returned by the function (could be valid:false)
+  return (data ?? { valid: false, error: "Resposta vazia da edge function" }) as ReadColumnsResult;
+}
+
+/**
+ * Call `read-columns` asking the server to also convert the Excel to CSV
+ * and save it in Storage.  Use this for large files (>50 MB) where the
+ * browser Worker runs out of memory doing the conversion client-side.
+ *
+ * The Edge Function will:
+ *   1. Download the Excel from Storage
+ *   2. Parse, validate header, extract column metadata
+ *   3. Generate CSV and upload it back to Storage (same path, .csv extension)
+ *   4. Return metadata + csvPath
+ */
+export async function callReadColumnsWithCsv(
+  storagePath: string,
+  fileName: string
+): Promise<ReadColumnsResult> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return { valid: false, error: "Supabase não configurado" };
+  }
+
+  const { data, error } = await supabase.functions.invoke("read-columns", {
+    body: { storagePath, fileName, convertToCsv: true },
+  });
+
+  if (error) {
+    return { valid: false, error: `Falha ao chamar edge function: ${error.message}` };
+  }
+
   return (data ?? { valid: false, error: "Resposta vazia da edge function" }) as ReadColumnsResult;
 }
 

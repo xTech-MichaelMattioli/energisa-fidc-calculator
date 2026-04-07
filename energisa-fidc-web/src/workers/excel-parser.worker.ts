@@ -178,27 +178,38 @@ function detectDate(name: string): string | undefined {
 const HEADER_SCAN_ROWS = 15;
 
 function parseWorkbook(buffer: ArrayBuffer) {
+  console.log("[Worker] parseWorkbook — buffer size:", buffer.byteLength, "bytes");
+
   const uint8 = new Uint8Array(buffer);
   const workbook = XLSX.read(uint8, {
     type: "array",
     cellDates: false,
     raw: false,
   });
+
+  console.log("[Worker] workbook loaded — sheets:", workbook.SheetNames);
+
   const sheetName = workbook.SheetNames[0];
   const worksheet = workbook.Sheets[sheetName];
+
+  console.log("[Worker] worksheet !ref:", worksheet?.["!ref"] ?? "(undefined)");
 
   // Build a limited range covering only the first HEADER_SCAN_ROWS rows.
   // This avoids allocating a JS array for every row in the sheet just to
   // find the header — a 1 M-row file would create ~1 M arrays otherwise.
+  //
+  // IMPORTANT: use r.s.r as the base so the end row is relative to wherever
+  // the sheet actually starts (some exports begin at row 2 or later).
   const fullRef = worksheet["!ref"];
-  const scanRange = fullRef
-    ? (() => {
-        const r = XLSX.utils.decode_range(fullRef);
-        return {
-          s: r.s,
-          e: { r: Math.min(r.e.r, HEADER_SCAN_ROWS - 1), c: r.e.c },
-        };
-      })()
+  const fullRange = fullRef ? XLSX.utils.decode_range(fullRef) : null;
+  const scanRange = fullRange
+    ? {
+        s: fullRange.s,
+        e: {
+          r: Math.min(fullRange.e.r, fullRange.s.r + HEADER_SCAN_ROWS - 1),
+          c: fullRange.e.c,
+        },
+      }
     : undefined;
 
   const rawRows = XLSX.utils.sheet_to_json(worksheet, {
@@ -209,10 +220,17 @@ function parseWorkbook(buffer: ArrayBuffer) {
     range: scanRange,
   }) as unknown[][];
 
+  console.log("[Worker] rawRows (scan) length:", rawRows.length,
+    "| scanRange:", JSON.stringify(scanRange ?? null),
+    "| fullRange:", JSON.stringify(fullRange ?? null));
+
   const headerRowIdx = findHeaderRowIndex(rawRows);
   const headerRow = (rawRows[headerRowIdx] ?? []) as unknown[];
 
-  return { workbook, sheetName, worksheet, rawRows, headerRowIdx, headerRow };
+  console.log("[Worker] headerRowIdx:", headerRowIdx,
+    "| headerRow sample:", (headerRow as unknown[]).slice(0, 5));
+
+  return { workbook, sheetName, worksheet, rawRows, headerRowIdx, headerRow, fullRange };
 }
 
 // ── Mode: "parse" (legacy) ────────────────────────────────────────
@@ -280,19 +298,33 @@ function handleParse(id: string, buffer: ArrayBuffer, name: string, size: number
 // ── Mode: "convert" (Excel → CSV + metadata) ─────────────────────
 
 function handleConvert(id: string, buffer: ArrayBuffer, name: string, size: number) {
-  const { sheetName, worksheet, rawRows, headerRowIdx, headerRow } =
+  const { sheetName, worksheet, rawRows, headerRowIdx, headerRow, fullRange } =
     parseWorkbook(buffer);
 
-  // ── Validate header ──
-  if (rawRows.length < 2 || !isHeaderRow(headerRow)) {
+  // ── Validate: worksheet has data ──
+  // Use the worksheet !ref (totalRows) instead of rawRows.length because
+  // rawRows is now limited to HEADER_SCAN_ROWS — it no longer reflects the
+  // real row count of the file.  rawRows.length === 0 means even the scan
+  // range returned nothing (e.g. XLSX.read produced an empty sheet).
+  const totalRows = fullRange ? fullRange.e.r - fullRange.s.r + 1 : 0;
+
+  let validationError: string | null = null;
+  if (totalRows === 0 || !fullRange) {
+    validationError =
+      "Não foi possível ler o arquivo. Verifique se o arquivo não está corrompido ou tente um formato diferente.";
+  } else if (totalRows < 2) {
+    validationError = "Arquivo precisa ter pelo menos 2 linhas (cabeçalho + dados).";
+  } else if (rawRows.length === 0 || !isHeaderRow(headerRow)) {
+    validationError =
+      "Cabeçalho não reconhecido — a primeira linha não contém nomes de colunas.";
+  }
+
+  if (validationError) {
     const out: WorkerOutput = {
       id,
       convert: {
         valid: false,
-        error:
-          rawRows.length < 2
-            ? "Arquivo precisa ter pelo menos 2 linhas (cabeçalho + dados)."
-            : "Cabeçalho não reconhecido — a primeira linha não contém nomes de colunas.",
+        error: validationError,
         csvBuffer: new ArrayBuffer(0),
         columns: [],
         columnInfo: [],
@@ -441,6 +473,8 @@ function handleConvert(id: string, buffer: ArrayBuffer, name: string, size: numb
 self.onmessage = (e: MessageEvent<WorkerInput>) => {
   const { type = "parse", id, buffer, name, size } = e.data;
 
+  console.log(`[Worker] received message — type: ${type}, name: ${name}, size: ${size}`);
+
   try {
     if (type === "convert") {
       handleConvert(id, buffer, name, size);
@@ -448,6 +482,7 @@ self.onmessage = (e: MessageEvent<WorkerInput>) => {
       handleParse(id, buffer, name, size);
     }
   } catch (err) {
+    console.error("[Worker] uncaught error:", err);
     const out: WorkerOutput = { id, error: String(err) };
     self.postMessage(out);
   }
