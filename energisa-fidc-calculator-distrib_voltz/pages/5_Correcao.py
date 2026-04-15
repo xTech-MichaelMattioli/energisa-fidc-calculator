@@ -686,6 +686,9 @@ def show():
             
             **Formato esperado:** Arquivo HTML/Excel da BMF com dados de DI x pré
             """)
+            st.markdown(
+                "🔗 Fonte oficial DI-PRE (B3): https://www2.bmf.com.br/pages/portal/bmfbovespa/boletim1/txref1.asp"
+            )
             
             # Upload do arquivo CDI
             uploaded_file_cdi = st.file_uploader(
