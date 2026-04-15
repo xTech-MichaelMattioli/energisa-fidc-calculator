@@ -42,6 +42,7 @@ Documentação de alto nível sobre implementação geral do sistema:
 | Documento | Descrição | Status |
 |-----------|-----------|--------|
 | **RESUMO_IMPLEMENTACAO.md** | Resumo geral da implementação do FIDC Calculator, escopo técnico, componentes principais | ⚠️ Vazio |
+| **REGRAS_CALCULO_COLUNAS_OUTPUT_CSV.md** | Regras de cálculo coluna a coluna para os CSVs finais (fluxo padrão e VOLTZ), incluindo fórmulas, mapeamentos e regras de exportação | ✅ Completo |
 
 📌 **Use esta pasta quando:** Precisa entender a arquitetura geral do sistema implementado.
 
