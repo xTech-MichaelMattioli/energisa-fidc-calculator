@@ -47,6 +47,46 @@ class CalculadorVoltz:
         
         # Sempre usar IGP-M para VOLTZ
         self.indice_correcao = "IGP-M"
+
+    @staticmethod
+    def _somar_meses_calendario(data_base: pd.Series, meses: pd.Series) -> pd.Series:
+        """
+        Soma meses respeitando calendário real (dias do mês e ano bissexto).
+
+        Exemplo: 31/01 + 1 mês -> 28/02 (ou 29/02 em ano bissexto).
+        """
+        data_base_dt = pd.to_datetime(data_base, errors='coerce').fillna(pd.Timestamp(datetime.now()))
+        meses_int = pd.to_numeric(meses, errors='coerce').fillna(0).astype(int)
+
+        ano_base = data_base_dt.dt.year.to_numpy(dtype=np.int32)
+        mes_base = data_base_dt.dt.month.to_numpy(dtype=np.int32)
+        dia_base = data_base_dt.dt.day.to_numpy(dtype=np.int32)
+
+        mes_total = (mes_base - 1) + meses_int.to_numpy(dtype=np.int32)
+        ano_destino = ano_base + np.floor_divide(mes_total, 12)
+        mes_destino = np.mod(mes_total, 12) + 1
+
+        primeiro_dia_destino = pd.to_datetime(
+            {
+                'year': ano_destino,
+                'month': mes_destino,
+                'day': np.ones(len(mes_destino), dtype=np.int32),
+            },
+            errors='coerce',
+        )
+        ultimo_dia_destino = primeiro_dia_destino + pd.offsets.MonthEnd(0)
+        dia_limite = ultimo_dia_destino.dt.day.to_numpy(dtype=np.int32)
+
+        dia_destino = np.minimum(dia_base, dia_limite)
+
+        return pd.to_datetime(
+            {
+                'year': ano_destino,
+                'month': mes_destino,
+                'day': dia_destino,
+            },
+            errors='coerce',
+        )
     
     def identificar_voltz(self, nome_arquivo: str) -> bool:
         """
@@ -1599,8 +1639,12 @@ class CalculadorVoltz:
         if 'meses_ate_recebimento' not in df.columns:
             df = self._calcular_meses_ate_recebimento(df, data_base)
 
-        # Usar DateOffset para adicionar meses corretamente
-        df['data_recebimento'] = pd.to_datetime(data_base) + pd.to_timedelta(df['meses_ate_recebimento'] * 30, unit='days')
+        # Data de recebimento por calendário real (sem aproximação por 30 dias)
+        data_base_serie = pd.Series(pd.to_datetime(data_base), index=df.index)
+        df['data_recebimento'] = self._somar_meses_calendario(
+            data_base=data_base_serie,
+            meses=df['meses_ate_recebimento'],
+        )
 
         # 2. BUSCAR ÍNDICES IGP-M (operação única)
         df_indices_igpm = self._obter_dados_igpm_voltz()

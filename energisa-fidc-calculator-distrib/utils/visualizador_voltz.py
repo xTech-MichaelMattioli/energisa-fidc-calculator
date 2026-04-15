@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from .checkpoint_manager import checkpoint_manager
+from .exportacao_csv_brasil import salvar_csv_brasil
 
 
 class VisualizadorVoltz:
@@ -422,8 +423,8 @@ class VisualizadorVoltz:
                 colunas_restantes_completo = [col for col in df_export.columns if col not in colunas_ordem_voltz]
                 df_export = df_export[colunas_existentes_completo + colunas_restantes_completo]
                 
-                # Salvar arquivo
-                df_export.to_csv(caminho_arquivo, index=False, encoding='utf-8-sig', sep=';', decimal=',')
+                # Salvar arquivo no formato brasileiro com truncamento para 2 casas
+                df_export = salvar_csv_brasil(df_export, caminho_arquivo, casas_decimais=4)
                 
                 st.success(f"✅ **Dados VOLTZ salvos com sucesso!**")
                 st.info(f"📄 **Arquivo:** `{nome_arquivo}`")

@@ -1,0 +1,9 @@
+# FIDC Calculator v2 — Dependências
+# Instale com: pip install -r requirements.txt
+
+streamlit>=1.32
+pandas>=2.0
+numpy>=1.24
+openpyxl>=3.1        # Leitura/escrita de .xlsx
+sidrapy>=0.1.5       # IPCA via API IBGE SIDRA
+python-dateutil>=2.8 # Parsing de datas

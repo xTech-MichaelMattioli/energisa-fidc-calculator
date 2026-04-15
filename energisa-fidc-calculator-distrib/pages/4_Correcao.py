@@ -14,6 +14,14 @@ from utils.calculador_correcao import CalculadorCorrecao
 from utils.calculador_valor_justo_distribuidoras import CalculadorValorJustoDistribuidoras, CalculadorValorJusto
 from utils.visualizador_voltz import VisualizadorVoltz
 from utils.visualizador_distribuidoras import VisualizadorDistribuidoras
+from utils.auto_export_resultado import exportar_resultado_final_excel
+from utils.exportacao_csv_brasil import salvar_csv_brasil
+from utils.correcao_otimizada import (
+    aplicar_correcao_monetaria_vetorizada,
+    calcular_indice_diario_vetorizado,
+    calcular_valor_justo_di_pre_vetorizado,
+    otimizar_curva_di_pre,
+)
 
 # Importar classe de valor justo do app original
 import requests
@@ -438,63 +446,16 @@ class CalculadorValorJusto:
         """
         Calcula valor justo aplicando taxas DI-PRE com progressão exponencial sobre valor corrigido
         """
-        if data_base is None:
-            data_base = datetime.now()
-        
-        df_resultado = df_corrigido.copy()
-        
-        # Verificar se temos coluna prazo_recebimento, senão usar 6 meses como padrão
-        if 'prazo_recebimento' not in df_resultado.columns:
-            df_resultado['prazo_recebimento'] = 6  # Padrão 6 meses
-        
-        # Inicializar colunas para DI-PRE
-        df_resultado['taxa_di_pre'] = 0.0
-        df_resultado['fator_exponencial_di_pre'] = 1.0
-        
-        # Para cada linha do df_resultado, buscar a taxa DI-PRE correspondente
-        for idx, row in df_resultado.iterrows():
-            meses_recebimento = row['prazo_recebimento']
-            
-            # Buscar no df_di_pre a linha onde meses_futuros é igual ao prazo_recebimento
-            linha_di_pre = df_di_pre[df_di_pre['meses_futuros'] == meses_recebimento]
-            
-            if not linha_di_pre.empty:
-                # Pegar a primeira linha correspondente e usar a coluna '252' (taxa para 252 dias úteis)
-                taxa_di_pre = linha_di_pre.iloc[0]['252'] / 100  # Converter de % para decimal
-                df_resultado.at[idx, 'taxa_di_pre'] = taxa_di_pre
-                
-                # Calcular fator exponencial com DI-PRE: (1 + taxa_di_pre)^(meses_recebimento/12)
-                fator_exponencial = (1 + taxa_di_pre) ** (meses_recebimento / 12)
-                df_resultado.at[idx, 'fator_exponencial_di_pre'] = fator_exponencial
-            else:
-                # Se não encontrar correspondência, usar taxa padrão de 0.5% ao mês
-                taxa_padrao = 0.005
-                df_resultado.at[idx, 'taxa_di_pre'] = taxa_padrao
-                fator_exponencial = (1 + taxa_padrao) ** (meses_recebimento / 12)
-                df_resultado.at[idx, 'fator_exponencial_di_pre'] = fator_exponencial
-        
-        # Dias de atraso em relação ao vencimento
-        df_resultado['data_vencimento'] = data_base + pd.DateOffset(months=6)
-        df_resultado['dias_atraso'] = (datetime.now() - df_resultado['data_vencimento']).dt.days.clip(lower=0)
-
-        # Multa proporcional: 1% ao mês → 0.01 / 30 por dia, com fallback para dias_atraso = 0
-        df_resultado['multa_para_justo'] = (0.01 / 30) * df_resultado['dias_atraso']
-        
-        # Fallback: se dias_atraso = 0, usar multa de 0,06 (6%)
-        df_resultado['multa_para_justo'] = df_resultado['multa_para_justo'].where(
-            df_resultado['dias_atraso'] > 0, 
-            0.06
-        )
-        
-        # Verificar se temos coluna de taxa_recuperacao
-        if 'taxa_recuperacao' in df_resultado.columns:            
-            # Fórmula com DI-PRE: valor_justo = valor_corrigido * taxa_recuperacao * (fator_exponencial_di_pre + multa)
-            df_resultado['valor_justo_ate_recebimento'] = df_resultado[coluna_valor_corrigido] * df_resultado['taxa_recuperacao'] * (df_resultado['fator_exponencial_di_pre'] + df_resultado['multa_para_justo'])
-        else:
+        try:
+            return calcular_valor_justo_di_pre_vetorizado(
+                df_corrigido=df_corrigido,
+                df_di_pre=df_di_pre,
+                coluna_valor_corrigido=coluna_valor_corrigido,
+                data_base=data_base,
+            )
+        except KeyError:
             st.error("❌ Taxa de recuperação não encontrada nos dados")
             return
-        
-        return df_resultado
     
     def obter_estatisticas_di_pre(self, df_di_pre):
         """
@@ -896,6 +857,9 @@ def show():
             
             **Formato esperado:** Arquivo HTML/Excel da BMF com dados de DI x pré
             """)
+            st.markdown(
+                "🔗 Fonte oficial DI-PRE (B3): https://www2.bmf.com.br/pages/portal/bmfbovespa/boletim1/txref1.asp"
+            )
             
             # Upload do arquivo CDI
             uploaded_file_cdi = st.file_uploader(
@@ -925,44 +889,8 @@ def show():
                             if 'df_com_aging' in st.session_state:
                                 del st.session_state.df_com_aging
 
-                            # Tratar dados df_di_pre - transformar dias em meses, usando float
-                            # pegar o ano da data_arquivo
-                            st.session_state.df_di_pre['meses_futuros'] = (st.session_state.df_di_pre['dias_corridos'] / 30.44)
-                            
-                            #Filtrar dados para mês sendo o mais próximo do numero inteiro seguindo a sequência 1,2,3,4,5,6...
-
-                            # Lista para armazenar os índices das linhas que serão selecionadas.
-                            indices_para_manter = []
-
-                            # Determina o valor máximo de meses para saber até onde iterar.
-                            # O `+ 2` garante que o loop inclua o último mês.
-                            limite_mes = int(st.session_state.df_di_pre['meses_futuros'].max()) + 2
-
-                            # Itera de 1 até o limite de meses.
-                            for i in range(1, limite_mes):
-                                # Encontra o índice da linha que tem o valor 'mes' mais próximo do inteiro 'i'.
-                                indice_mais_proximo = (st.session_state.df_di_pre['meses_futuros'] - i).abs().idxmin()
-                                indices_para_manter.append(indice_mais_proximo)
-
-                            # Filtra o DataFrame original usando os índices encontrados e remove duplicatas.
-                            df_filtrado = st.session_state.df_di_pre.loc[indices_para_manter].drop_duplicates()
-
-                            # Ou salvar em uma nova variável de estado para usar depois:
-                            st.session_state.df_di_pre = df_filtrado
-
-                            # arredonda o mes
-                            st.session_state.df_di_pre['meses_futuros'] = st.session_state.df_di_pre['meses_futuros'].round().astype(int)
-
-                            # 1. Garanta que a coluna de data esteja no formato datetime do pandas.
-                            st.session_state.df_di_pre['data_arquivo'] = pd.to_datetime(st.session_state.df_di_pre['data_arquivo'], format='%Y-%m-%d')
-
-                            # 2. Calcule a data futura somando os dias corridos.
-                            #    A função pd.to_timedelta converte o número de dias para um formato que pode ser somado a datas.
-                            data_futura = st.session_state.df_di_pre['data_arquivo'] + pd.to_timedelta(st.session_state.df_di_pre['dias_corridos'], unit='d')
-
-                            # 3. Crie as novas colunas 'ano_atual' e 'mes_atual' a partir da data futura.
-                            st.session_state.df_di_pre['ano_atual'] = data_futura.dt.year
-                            st.session_state.df_di_pre['mes_atual'] = data_futura.dt.month
+                            # Otimizar curva DI-PRE (vetorizado, sem loop por mes)
+                            st.session_state.df_di_pre = otimizar_curva_di_pre(st.session_state.df_di_pre)
 
                             st.rerun()  # Recarregar a página para atualizar o estado
                         else:
@@ -994,7 +922,40 @@ def show():
     
     # ETAPA 3: INFORMAÇÕES E CÁLCULO
     st.subheader("📊 3️⃣ Executar Cálculo")
-    
+
+    # ── Data Base ──────────────────────────────────────────────────────
+    with st.container():
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stDateInput"] { max-width: 220px; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        col_date, col_info = st.columns([1, 2])
+        with col_date:
+            nova_data_base = st.date_input(
+                "📅 Data Base",
+                value=st.session_state.params.data_base_padrao,
+                format="DD/MM/YYYY",
+                key="input_data_base",
+                help="Data de referência para correção monetária, aging e projeções.",
+            )
+        with col_info:
+            st.markdown("")  # espaçamento vertical
+            st.info(
+                f"📅 **Data Base selecionada:** "
+                f"**{nova_data_base.strftime('%d/%m/%Y')}**"
+            )
+        # Atualizar o parâmetro global
+        st.session_state.params.data_base_padrao = datetime.combine(
+            nova_data_base, datetime.min.time()
+        )
+        data_base_execucao = pd.Timestamp(st.session_state.params.data_base_padrao)
+
+    st.markdown("---")
+
     # Seção de informações antes do cálculo
     st.write("**Informações do Processamento:**")
 
@@ -1033,6 +994,7 @@ def show():
     if calculo_executado:
         # Marcar que o cálculo foi solicitado pelo usuário
         st.session_state.calculo_solicitado = True
+        st.session_state.calculo_execucao_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         
         try:
             # ========== DASHBOARD DE PROGRESSO EM TEMPO REAL ==========
@@ -1045,11 +1007,60 @@ def show():
             
             # Container para logs detalhados
             log_container = st.expander("📊 **Logs Detalhados de Performance**", expanded=False)
+
+            # Pré-visualizações intermediárias por etapa (otimizadas para não sobrecarregar a UI)
+            exibir_previews_etapas = st.checkbox(
+                "📋 Exibir pré-visualizações por etapa",
+                value=True,
+                help="Mostra amostras parciais (tabelas enxutas) após etapas-chave do processamento.",
+            )
+            limite_preview = st.selectbox(
+                "Registros por pré-visualização",
+                options=[10, 20, 30, 50],
+                index=1,
+                disabled=not exibir_previews_etapas,
+            )
+
+            def exibir_preview_etapa(df_etapa, titulo_etapa, colunas_chave=None):
+                """Exibe uma prévia parcial e enxuta do resultado intermediário por etapa."""
+                if not exibir_previews_etapas:
+                    return
+                if df_etapa is None or df_etapa.empty:
+                    return
+
+                if colunas_chave is None:
+                    colunas_chave = []
+
+                colunas_base = [
+                    'nome_cliente', 'contrato', 'empresa', 'data_base', 'data_vencimento',
+                    'dias_atraso', 'aging', 'valor_liquido', 'valor_corrigido',
+                ]
+
+                colunas_ordenadas = []
+                for col in colunas_base + colunas_chave:
+                    if col in df_etapa.columns and col not in colunas_ordenadas:
+                        colunas_ordenadas.append(col)
+
+                if not colunas_ordenadas:
+                    colunas_ordenadas = list(df_etapa.columns[:8])
+
+                df_preview = df_etapa[colunas_ordenadas].head(limite_preview).copy()
+
+                with st.expander(f"📋 Pré-visualização parcial - {titulo_etapa}", expanded=False):
+                    st.caption(
+                        f"Mostrando {len(df_preview)} de {len(df_etapa):,} registros "
+                        f"com {len(colunas_ordenadas)} colunas-chave."
+                    )
+                    st.dataframe(df_preview, use_container_width=True, height=320)
             
+            # Garantir que a data_base selecionada sobrescreva a coluna de entrada antes de qualquer cálculo
+            df_entrada_calculo = df_padronizado.copy()
+            df_entrada_calculo['data_base'] = data_base_execucao
+
             # Iniciar cronômetro
             import time
             inicio_processamento = time.time()
-            total_registros = len(df_padronizado)
+            total_registros = len(df_entrada_calculo)
             
             # ========== ETAPA 1: CÁLCULO DE AGING (20%) ==========
             status_text.text("🔄 Etapa 1/5: Calculando aging dos contratos...")
@@ -1059,7 +1070,7 @@ def show():
                 st.info(f"📊 **Iniciando processamento ultra-otimizado:** {total_registros:,} registros")
                 
             etapa_inicio = time.time()
-            df_com_aging = calc_aging.processar_aging_completo(df_padronizado.copy())
+            df_com_aging = calc_aging.processar_aging_completo(df_entrada_calculo.copy())
             etapa_tempo = time.time() - etapa_inicio
             
             if df_com_aging.empty:
@@ -1071,6 +1082,12 @@ def show():
             
             with log_container:
                 st.success(f"✅ **Aging calculado:** {len(df_com_aging):,} registros em {etapa_tempo:.2f}s ({velocidade_aging:,.0f} reg/s)")
+
+            exibir_preview_etapa(
+                df_com_aging,
+                "Etapa 1 - Aging",
+                ['aging_taxa', 'valor_principal_limpo', 'valor_liquido'],
+            )
             
             # ========== ETAPA 2: DETECÇÃO AUTOMÁTICA (40%) ==========
             status_text.text("� Etapa 2/5: Detectando tipo de distribuidora e regras...")
@@ -1091,6 +1108,12 @@ def show():
                 df_com_aging.copy(), 
                 nome_arquivo_original,  # Passa o nome do arquivo para detecção
                 st.session_state.df_taxa_recuperacao
+            )
+
+            exibir_preview_etapa(
+                df_final_temp,
+                "Etapa 2 - Regras Específicas",
+                ['taxa_recuperacao', 'prazo_recebimento', 'valor_recuperavel_ate_data_base'],
             )
 
             # Detectar se é VOLTZ para decidir o fluxo
@@ -1311,7 +1334,7 @@ def show():
                             caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
                             
                             with st.spinner("📤 Salvando arquivo CSV..."):
-                                df_tipado.to_csv(caminho_arquivo, index=False, encoding='utf-8-sig')
+                                salvar_csv_brasil(df_tipado, caminho_arquivo, casas_decimais=4)
                                 
                         elif formato_export == "Pickle (.pkl)":
                             extensao = ".pkl"
@@ -1358,10 +1381,30 @@ def show():
                 
                 # Para VOLTZ, apenas aplicar o valor justo reajustado
                 df_final_temp = calc_correcao.calcular_valor_justo_reajustado(df_final_temp)
+
+                exibir_preview_etapa(
+                    df_final_temp,
+                    "Etapa Final VOLTZ",
+                    [
+                        'valor_corrigido_ate_recebimento', 'valor_recuperavel_ate_recebimento',
+                        'remuneracao_variavel_perc', 'remuneracao_variavel_valor',
+                        'valor_recebimento_pos_rv', 'valor_justo'
+                    ],
+                )
                 
                 # Finalizar processamento para VOLTZ
                 st.session_state.df_final = df_final_temp
                 st.session_state.df_com_aging = df_com_aging
+
+                caminho_exportado, novo_arquivo = exportar_resultado_final_excel(
+                    st.session_state.df_final,
+                    eh_voltz=True,
+                )
+                if caminho_exportado:
+                    if novo_arquivo:
+                        st.success(f"💾 Resultado final VOLTZ exportado automaticamente em: {caminho_exportado}")
+                    else:
+                        st.info(f"💾 Última exportação automática VOLTZ: {caminho_exportado}")
                 
                 progress_main.progress(1.0)
                 etapa_tempo = time.time() - etapa_inicio
@@ -1611,7 +1654,7 @@ def show():
                                 caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
                                 
                                 with st.spinner("📤 Salvando arquivo CSV..."):
-                                    df_tipado.to_csv(caminho_arquivo, index=False, encoding='utf-8-sig')
+                                    salvar_csv_brasil(df_tipado, caminho_arquivo, casas_decimais=4)
                                     
                             elif formato_export == "Pickle (.pkl)":
                                 extensao = ".pkl"
@@ -1742,10 +1785,31 @@ def show():
                     df_indices['ano_mes'] = df_indices['data'].dt.to_period('M')
                     df_final_temp['ano_mes_base'] = df_final_temp['data_base'].dt.to_period('M')
                     df_final_temp['ano_mes_venc'] = df_final_temp['data_vencimento_limpa'].dt.to_period('M')
+
+                    registros_antes_merge_indices = len(df_final_temp)
+
+                    # Garantir cardinalidade 1:1 por ano_mes para evitar explosão de linhas no merge.
+                    df_indices_merge = df_indices[
+                        ['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal', 'taxa_diaria']
+                    ].dropna(subset=['ano_mes']).copy()
+
+                    duplicatas_ano_mes = int(df_indices_merge.duplicated(subset=['ano_mes']).sum())
+                    if duplicatas_ano_mes > 0:
+                        with log_container:
+                            st.warning(
+                                f"⚠️ Foram encontradas {duplicatas_ano_mes:,} linhas duplicadas de índices por mês. "
+                                "Aplicando deduplicação para manter 1 registro por ano-mês."
+                            )
+                        df_indices_merge = (
+                            df_indices_merge
+                            .sort_values('ano_mes')
+                            .drop_duplicates(subset=['ano_mes'], keep='last')
+                            .reset_index(drop=True)
+                        )
                     
                     # Merge com data base
                     df_merged_base = df_final_temp.merge(
-                        df_indices[['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal','taxa_diaria']].rename(columns={
+                        df_indices_merge.rename(columns={
                             'ano_mes': 'ano_mes_base',
                             'indice': 'indice_mes_base',
                             'indice_mes_anterior': 'indice_mes_anterior_base',
@@ -1753,8 +1817,16 @@ def show():
                             'taxa_diaria': 'taxa_diaria_base'
                         }),
                         on='ano_mes_base',
-                        how='left'
+                        how='left',
+                        validate='m:1'
                     )
+
+                    if len(df_merged_base) != registros_antes_merge_indices:
+                        with log_container:
+                            st.warning(
+                                f"⚠️ Merge de data base alterou contagem de linhas "
+                                f"({registros_antes_merge_indices:,} → {len(df_merged_base):,})."
+                            )
                     
                     progress_main.progress(0.54)
                     
@@ -1763,7 +1835,7 @@ def show():
                         st.info("🔄 **Merge 2/2:** Índices da data vencimento (O(log n))...")
                         
                     df_merged_completo = df_merged_base.merge(
-                        df_indices[['ano_mes', 'indice', 'indice_mes_anterior', 'taxa_mensal','taxa_diaria']].rename(columns={
+                        df_indices_merge.rename(columns={
                             'ano_mes': 'ano_mes_venc',
                             'indice': 'indice_mes_venc',
                             'indice_mes_anterior': 'indice_mes_anterior_venc',
@@ -1771,8 +1843,43 @@ def show():
                             'taxa_diaria': 'taxa_diaria_venc'
                         }),
                         on='ano_mes_venc',
-                        how='left'
+                        how='left',
+                        validate='m:1'
                     )
+
+                    if len(df_merged_completo) != registros_antes_merge_indices:
+                        with log_container:
+                            st.warning(
+                                f"⚠️ Merge de data vencimento alterou contagem de linhas "
+                                f"({registros_antes_merge_indices:,} → {len(df_merged_completo):,})."
+                            )
+
+                    # ==== FALLBACK: ÚLTIMO ÍNDICE DISPONÍVEL ==== 
+                    # Quando a competência da data_base/data_vencimento não existe na curva,
+                    # usar o último índice válido disponível para evitar fator=1 silencioso.
+                    serie_indices_validos = pd.to_numeric(df_indices_merge.get('indice'), errors='coerce').dropna()
+                    if not serie_indices_validos.empty:
+                        ultimo_indice_disponivel = float(serie_indices_validos.iloc[-1])
+
+                        mask_base_sem_indice = df_merged_completo['indice_mes_base'].isna()
+                        qtd_base_sem_indice = int(mask_base_sem_indice.sum())
+                        if qtd_base_sem_indice > 0:
+                            df_merged_completo.loc[mask_base_sem_indice, 'indice_mes_base'] = ultimo_indice_disponivel
+                            with log_container:
+                                st.warning(
+                                    f"⚠️ {qtd_base_sem_indice:,} registro(s) sem índice da data base. "
+                                    f"Aplicado fallback para o último índice disponível ({ultimo_indice_disponivel:.6f})."
+                                )
+
+                        mask_venc_sem_indice = df_merged_completo['indice_mes_venc'].isna()
+                        qtd_venc_sem_indice = int(mask_venc_sem_indice.sum())
+                        if qtd_venc_sem_indice > 0:
+                            df_merged_completo.loc[mask_venc_sem_indice, 'indice_mes_venc'] = ultimo_indice_disponivel
+                            with log_container:
+                                st.warning(
+                                    f"⚠️ {qtd_venc_sem_indice:,} registro(s) sem índice do vencimento. "
+                                    f"Aplicado fallback para o último índice disponível ({ultimo_indice_disponivel:.6f})."
+                                )
                     
                     progress_main.progress(0.56)
                     
@@ -1780,55 +1887,29 @@ def show():
                     with log_container:
                         st.info("🧮 **Cálculo vetorizado** de índices diários...")
                     
-                    # Função para calcular índice na data específica
-                    def calcular_indice_diario(row, tipo='base'):
-                        if tipo == 'base':
-                            data = row['data_base']
-                            indice_mes = row['indice_mes_base']
-                            indice_mes_anterior = row['indice_mes_anterior_base']
-                            taxa_mensal = row['taxa_mensal_base']
-                            taxa_diaria = row['taxa_diaria_base']
-                            data_fechamento = row['data_base']
-                        else:  # vencimento
-                            data = row['data_vencimento_limpa']
-                            indice_mes = row['indice_mes_venc']
-                            indice_mes_anterior = row['indice_mes_anterior_venc']
-                            taxa_mensal = row['taxa_mensal_venc']
-                            taxa_diaria = row['taxa_diaria_venc']
-                            data_fechamento = row['data_vencimento_limpa']
-                        
-                        if pd.isna(data) or pd.isna(indice_mes) or pd.isna(taxa_mensal):
-                            return indice_mes if not pd.isna(indice_mes) else np.nan
-                        
-                        # Se a data é o último dia do mês de data_fechamento, usar índice direto
-                        ultimo_dia_mes = (data_fechamento + pd.offsets.MonthEnd(0)).day
-                        if data.day == ultimo_dia_mes:
-                            return indice_mes
-                        
-                        # Calcular dias do período
-                        dias_periodo = data.day
-                        
-                        # Taxa do período
-                        taxa_periodo = ((1 + taxa_diaria) ** (dias_periodo) - 1)
-
-                        # Índice na data
-                        indice_na_data = (indice_mes_anterior * taxa_periodo) + indice_mes_anterior 
-
-                        return indice_na_data
-                    
                     # Aplicar cálculo vetorizado
                     with log_container:
                         st.info("🔄 **Aplicando** índices data base...")
-                    df_merged_completo['indice_base_diario'] = df_merged_completo.apply(
-                        lambda row: calcular_indice_diario(row, 'base'), axis=1
+                    df_merged_completo['indice_base_diario'] = calcular_indice_diario_vetorizado(
+                        df=df_merged_completo,
+                        coluna_data='data_base',
+                        coluna_indice_mes='indice_mes_base',
+                        coluna_indice_mes_anterior='indice_mes_anterior_base',
+                        coluna_taxa_mensal='taxa_mensal_base',
+                        coluna_taxa_diaria='taxa_diaria_base',
                     )
                     
                     progress_main.progress(0.58)
                     
                     with log_container:
                         st.info("🔄 **Aplicando** índices data vencimento...")
-                    df_merged_completo['indice_venc_diario'] = df_merged_completo.apply(
-                        lambda row: calcular_indice_diario(row, 'vencimento'), axis=1
+                    df_merged_completo['indice_venc_diario'] = calcular_indice_diario_vetorizado(
+                        df=df_merged_completo,
+                        coluna_data='data_vencimento_limpa',
+                        coluna_indice_mes='indice_mes_venc',
+                        coluna_indice_mes_anterior='indice_mes_anterior_venc',
+                        coluna_taxa_mensal='taxa_mensal_venc',
+                        coluna_taxa_diaria='taxa_diaria_venc',
                     )
                     
                     # ==== CÁLCULO DO FATOR DE CORREÇÃO (ULTRA-RÁPIDO) ====
@@ -1848,24 +1929,10 @@ def show():
                     )
                     
                     # ==== APLICAR CORREÇÃO MONETÁRIA (VETORIZADA) ====
-                    df_merged_completo['correcao_monetaria'] = np.maximum(
-                        df_merged_completo['valor_liquido'] *
-                        (df_merged_completo['fator_correcao'] - 1),
-                        0
+                    df_merged_completo = aplicar_correcao_monetaria_vetorizada(
+                        df_merged_completo,
+                        coluna_fator='fator_correcao',
                     )
-
-                    df_merged_completo['valor_corrigido'] = (
-                        df_merged_completo['valor_liquido'] +
-                        df_merged_completo['multa'] +
-                        df_merged_completo['juros_moratorios'] +
-                        df_merged_completo['correcao_monetaria']
-                    )
-
-                    if 'taxa_recuperacao' in df_merged_completo.columns:
-                        df_merged_completo['valor_recuperavel_ate_data_base'] = (
-                            df_merged_completo['valor_corrigido'] *
-                            df_merged_completo['taxa_recuperacao']
-                        )
 
                     # Atualizar colunas finais
                     df_merged_completo.loc[mask_validos, 'indice_vencimento'] = df_merged_completo.loc[mask_validos, 'indice_venc_diario']
@@ -1907,24 +1974,11 @@ def show():
                 # ==== APLICAR CORREÇÃO MONETÁRIA FINAL (VETORIZADA) ====
                 with log_container:
                     st.info("💰 **Calculando correção monetária** vetorizada...")
-                    
-                df_final_temp['correcao_monetaria'] = np.maximum(
-                    df_final_temp['valor_liquido'] *
-                    (df_final_temp['fator_correcao'] - 1),
-                    0
-                )
 
-                df_final_temp['valor_corrigido'] = (
-                    df_final_temp['valor_liquido'] +
-                    df_final_temp['multa'] +
-                    df_final_temp['juros_moratorios'] +
-                    df_final_temp['correcao_monetaria']
+                df_final_temp = aplicar_correcao_monetaria_vetorizada(
+                    df_final_temp,
+                    coluna_fator='fator_correcao',
                 )
-
-                df_final_temp['valor_recuperavel_ate_data_base'] = (
-                        df_final_temp['valor_corrigido'] *
-                        df_final_temp['taxa_recuperacao']
-                    )
 
                 # Renomear fator_correcao para fator_correcao_ate_data_base
                 df_final_temp.rename(columns={'fator_correcao': 'fator_correcao_ate_data_base'}, inplace=True)
@@ -1937,7 +1991,14 @@ def show():
                 with log_container:
                     st.success(f"✅ **Correção monetária final:** {len(df_final_temp):,} registros em {etapa_tempo:.2f}s ({velocidade_correcao_final:,.0f} reg/s)")
 
-                st.dataframe(df_final_temp)
+                exibir_preview_etapa(
+                    df_final_temp,
+                    "Etapa 4 - Correção Monetária",
+                    [
+                        'fator_correcao_ate_data_base', 'correcao_monetaria',
+                        'juros_moratorios', 'multa', 'valor_corrigido'
+                    ],
+                )
 
                 # return
                 # ========== ETAPA 5: CÁLCULO DO VALOR JUSTO PARA DISTRIBUIDORAS ==========
@@ -1964,11 +2025,33 @@ def show():
                     # Aplicar descontos por aging sobre o valor justo
                     df_final_temp = calc_correcao.calcular_valor_justo_reajustado(df_final_temp)
 
+                    exibir_preview_etapa(
+                        df_final_temp,
+                        "Etapa 5 - Valor Justo",
+                        [
+                            'meses_ate_recebimento', 'ipca_mensal', 'fator_correcao_ate_recebimento',
+                            'mora_ate_recebimento', 'valor_corrigido_ate_recebimento',
+                            'taxa_recuperacao', 'valor_recuperavel_ate_recebimento',
+                            'remuneracao_variavel_perc', 'remuneracao_variavel_valor',
+                            'valor_recebimento_pos_rv', 'fator_de_desconto_vp', 'valor_justo'
+                        ],
+                    )
+
                     # ============= ETAPA 8: ADICIONAR COLUNAS INFORMATIVAS =============
                     
                     # Salvar resultado no session_state
                     st.session_state.df_final = df_final_temp
                     st.session_state.df_com_aging = df_com_aging
+
+                    caminho_exportado, novo_arquivo = exportar_resultado_final_excel(
+                        st.session_state.df_final,
+                        eh_voltz=False,
+                    )
+                    if caminho_exportado:
+                        if novo_arquivo:
+                            st.success(f"💾 Resultado final exportado automaticamente em: {caminho_exportado}")
+                        else:
+                            st.info(f"💾 Última exportação automática: {caminho_exportado}")
                     
                     # Calcular estatísticas do DI-PRE para exibição
                     calc_valor_justo = CalculadorValorJusto()
@@ -2017,15 +2100,62 @@ def show():
                     st.error(f"❌ Erro no cálculo do valor justo: {str(e)}")
                     st.warning("⚠️ Continuando com dados básicos (sem valor justo)")
                     # Salvar dados básicos mesmo com erro no valor justo
+                    if df_final_temp is None:
+                        df_final_temp = df_com_aging.copy() if df_com_aging is not None else pd.DataFrame()
                     st.session_state.df_final = df_final_temp
                     st.session_state.df_com_aging = df_com_aging
+
+                    caminho_exportado, novo_arquivo = exportar_resultado_final_excel(
+                        st.session_state.df_final,
+                        eh_voltz=False,
+                    )
+                    if caminho_exportado:
+                        if novo_arquivo:
+                            st.success(f"💾 Dados básicos exportados automaticamente em: {caminho_exportado}")
+                        else:
+                            st.info(f"💾 Última exportação automática: {caminho_exportado}")
+
                     st.exception(e)  # Debug detalhado
                     
         except Exception as e:
             st.error(f"❌ Erro ao processar correção: {str(e)}")
             st.exception(e)  # Debug
 
-        st.dataframe(st.session_state.df_final)
+        if 'df_final' in st.session_state and st.session_state.df_final is not None and not st.session_state.df_final.empty:
+            df_resumo = st.session_state.df_final
+
+            coluna_principal = 'valor_principal_limpo' if 'valor_principal_limpo' in df_resumo.columns else 'valor_principal'
+            total_valor_principal = df_resumo[coluna_principal].sum() if coluna_principal in df_resumo.columns else 0
+
+            if 'correcao_monetaria' in df_resumo.columns:
+                total_correcao_monetaria = df_resumo['correcao_monetaria'].sum()
+            else:
+                total_valor_corrigido = df_resumo['valor_corrigido'].sum() if 'valor_corrigido' in df_resumo.columns else 0
+                total_valor_liquido = df_resumo['valor_liquido'].sum() if 'valor_liquido' in df_resumo.columns else 0
+                total_correcao_monetaria = max(total_valor_corrigido - total_valor_liquido, 0)
+
+            coluna_valor_justo = 'valor_justo_reajustado' if 'valor_justo_reajustado' in df_resumo.columns else 'valor_justo'
+            total_valor_justo = df_resumo[coluna_valor_justo].sum() if coluna_valor_justo in df_resumo.columns else 0
+
+            st.markdown("### 📊 Comparativo Final de Valores")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric("📊 Valor Principal", f"R$ {total_valor_principal:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+            with col2:
+                st.metric("⚡ Correção Monetária", f"R$ {total_correcao_monetaria:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+            with col3:
+                st.metric("💎 Valor Justo", f"R$ {total_valor_justo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+            if coluna_valor_justo == 'valor_justo_reajustado':
+                st.caption("Valor Justo exibido com base em valor_justo_reajustado (pós-RV).")
+
+            st.write("**📋 Pré-visualização do resultado final**")
+            st.dataframe(st.session_state.df_final.head(200), use_container_width=True, height=420)
+            if len(st.session_state.df_final) > 200:
+                st.caption(f"Mostrando 200 de {len(st.session_state.df_final):,} registros para evitar MessageSizeError.")
 
     # Mostrar resultados APENAS se o cálculo foi solicitado pelo usuário E temos dados calculados
     calculo_foi_solicitado = st.session_state.get('calculo_solicitado', False)

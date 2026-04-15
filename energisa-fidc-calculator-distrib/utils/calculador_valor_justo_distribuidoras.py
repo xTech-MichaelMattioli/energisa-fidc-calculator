@@ -35,6 +35,60 @@ class CalculadorValorJustoDistribuidoras:
     
     def __init__(self, params):
         self.params = params
+
+    @staticmethod
+    def _somar_meses_calendario(data_base: pd.Series, meses: pd.Series) -> pd.Series:
+        """
+        Soma meses respeitando calendário real (dias do mês e ano bissexto).
+
+        Exemplo: 31/01 + 1 mês -> 28/02 (ou 29/02 em ano bissexto).
+        """
+        data_base_dt = pd.to_datetime(data_base, errors='coerce').fillna(pd.Timestamp(datetime.now()))
+        meses_int = pd.to_numeric(meses, errors='coerce').fillna(0).astype(int)
+
+        ano_base = data_base_dt.dt.year.to_numpy(dtype=np.int32)
+        mes_base = data_base_dt.dt.month.to_numpy(dtype=np.int32)
+        dia_base = data_base_dt.dt.day.to_numpy(dtype=np.int32)
+
+        mes_total = (mes_base - 1) + meses_int.to_numpy(dtype=np.int32)
+        ano_destino = ano_base + np.floor_divide(mes_total, 12)
+        mes_destino = np.mod(mes_total, 12) + 1
+
+        primeiro_dia_destino = pd.to_datetime(
+            {
+                'year': ano_destino,
+                'month': mes_destino,
+                'day': np.ones(len(mes_destino), dtype=np.int32),
+            },
+            errors='coerce',
+        )
+        ultimo_dia_destino = primeiro_dia_destino + pd.offsets.MonthEnd(0)
+        dia_limite = ultimo_dia_destino.dt.day.to_numpy(dtype=np.int32)
+
+        dia_destino = np.minimum(dia_base, dia_limite)
+
+        return pd.to_datetime(
+            {
+                'year': ano_destino,
+                'month': mes_destino,
+                'day': dia_destino,
+            },
+            errors='coerce',
+        )
+
+    @staticmethod
+    def _potencia_composta_estavel(base_taxa: pd.Series, expoente: pd.Series) -> np.ndarray:
+        """Calcula (1 + taxa)^expoente com estabilidade numérica e alta precisão intermediária."""
+        taxa = pd.to_numeric(base_taxa, errors='coerce').fillna(0.0).to_numpy(dtype=np.longdouble)
+        expn = pd.to_numeric(expoente, errors='coerce').fillna(0.0).to_numpy(dtype=np.longdouble)
+
+        # Evitar log1p inválido em taxas <= -100%
+        taxa = np.maximum(taxa, np.longdouble(-0.999999999999999))
+        fator = np.exp(np.log1p(taxa) * expn)
+
+        # Limpeza para valores não finitos
+        fator = np.where(np.isfinite(fator), fator, np.longdouble(0.0))
+        return fator.astype(np.float64)
     
     def processar_valor_justo_distribuidoras(self, df_final_temp, log_container, progress_main):
         """
@@ -101,20 +155,52 @@ class CalculadorValorJustoDistribuidoras:
             # Verificar se temos dados de taxa de recuperação carregados
             if 'df_taxa_recuperacao' in st.session_state and not st.session_state.df_taxa_recuperacao.empty:
                 df_taxa = st.session_state.df_taxa_recuperacao.copy()
+
+                registros_antes_merge = len(df_final_temp)
+
+                # Normalizar chaves para merge e deduplicar a tabela de taxa para evitar many-to-many.
+                df_final_temp['_empresa_merge'] = df_final_temp['empresa'].astype(str).str.strip()
+                df_final_temp['_tipo_merge'] = df_final_temp['tipo'].astype(str).str.strip()
+                df_final_temp['_aging_merge'] = df_final_temp['aging_taxa'].astype(str).str.strip()
+
+                df_taxa_merge = df_taxa[['Empresa', 'Tipo', 'Aging', 'Prazo de recebimento']].copy()
+                df_taxa_merge['Empresa'] = df_taxa_merge['Empresa'].astype(str).str.strip()
+                df_taxa_merge['Tipo'] = df_taxa_merge['Tipo'].astype(str).str.strip()
+                df_taxa_merge['Aging'] = df_taxa_merge['Aging'].astype(str).str.strip()
+
+                duplicatas_taxa = int(df_taxa_merge.duplicated(subset=['Empresa', 'Tipo', 'Aging']).sum())
+                if duplicatas_taxa > 0:
+                    with log_container:
+                        st.warning(
+                            f"⚠️ {duplicatas_taxa:,} chave(s) duplicada(s) em taxa de recuperação "
+                            "(Empresa/Tipo/Aging). Usando apenas a primeira ocorrência por chave."
+                        )
+                    df_taxa_merge = df_taxa_merge.drop_duplicates(
+                        subset=['Empresa', 'Tipo', 'Aging'],
+                        keep='first'
+                    )
                 
                 # Fazer merge para pegar o prazo_recebimento baseado em empresa, tipo e aging
                 df_final_temp = df_final_temp.merge(
-                    df_taxa[['Empresa', 'Tipo', 'Aging', 'Prazo de recebimento']],
-                    left_on=['empresa', 'tipo', 'aging_taxa'],
+                    df_taxa_merge,
+                    left_on=['_empresa_merge', '_tipo_merge', '_aging_merge'],
                     right_on=['Empresa', 'Tipo', 'Aging'],
-                    how='left'
+                    how='left',
+                    validate='m:1'
                 )
+
+                if len(df_final_temp) != registros_antes_merge:
+                    with log_container:
+                        st.warning(
+                            f"⚠️ Merge de prazo alterou contagem de linhas "
+                            f"({registros_antes_merge:,} → {len(df_final_temp):,})."
+                        )
                 
                 # Usar prazo_recebimento do merge, com fallback para valor padrão
                 df_final_temp['meses_ate_recebimento'] = df_final_temp['Prazo de recebimento'].fillna(6).astype(int)
                 
                 # Limpar colunas auxiliares do merge
-                colunas_merge = ['Empresa', 'Tipo', 'Aging', 'Prazo de recebimento']
+                colunas_merge = ['Empresa', 'Tipo', 'Aging', 'Prazo de recebimento', '_empresa_merge', '_tipo_merge', '_aging_merge']
                 df_final_temp = df_final_temp.drop(columns=[col for col in colunas_merge if col in df_final_temp.columns])
                 
                 # Mostrar estatísticas do mapeamento
@@ -134,28 +220,9 @@ class CalculadorValorJustoDistribuidoras:
             with log_container:
                 st.warning(f"⚠️ Erro ao usar dados da taxa de recuperação: {str(e)}")
                 st.info("📊 Usando valores padrão para meses de recebimento...")
-            
-            # Fallback para valores padrão baseados no aging_taxa
-            def calcular_meses_fallback(row):
-                aging_taxa = str(row.get('aging_taxa', 'Geral')).strip().lower()
-                if 'vencer' in aging_taxa:
-                    return 6
-                elif 'primeiro' in aging_taxa:
-                    return 6
-                elif 'segundo' in aging_taxa:
-                    return 6
-                elif 'terceiro' in aging_taxa:
-                    return 6
-                elif 'quarto' in aging_taxa:
-                    return 6
-                elif 'quinto' in aging_taxa:
-                    return 6
-                elif 'demais' in aging_taxa:
-                    return 6
-                else:
-                    return 6
-            
-            df_final_temp['meses_ate_recebimento'] = df_final_temp.apply(calcular_meses_fallback, axis=1)
+
+            # Fallback padrão: 6 meses
+            df_final_temp['meses_ate_recebimento'] = 6
         
         return df_final_temp
     
@@ -172,13 +239,45 @@ class CalculadorValorJustoDistribuidoras:
                 'meses_futuros': 'meses_ate_recebimento',
                 '252': 'taxa_di_pre_percentual'
             }, inplace=True)
+
+            df_di_pre_merge['meses_ate_recebimento'] = pd.to_numeric(
+                df_di_pre_merge['meses_ate_recebimento'],
+                errors='coerce'
+            ).round().astype('Int64')
+            df_di_pre_merge['taxa_di_pre_percentual'] = pd.to_numeric(
+                df_di_pre_merge['taxa_di_pre_percentual'],
+                errors='coerce'
+            )
+            df_di_pre_merge = df_di_pre_merge.dropna(subset=['meses_ate_recebimento', 'taxa_di_pre_percentual']).copy()
+            df_di_pre_merge['meses_ate_recebimento'] = df_di_pre_merge['meses_ate_recebimento'].astype(int)
+
+            duplicatas_di = int(df_di_pre_merge.duplicated(subset=['meses_ate_recebimento']).sum())
+            if duplicatas_di > 0:
+                with log_container:
+                    st.warning(
+                        f"⚠️ {duplicatas_di:,} prazo(s) duplicado(s) em DI-PRE. "
+                        "Mantendo a primeira taxa por prazo para evitar duplicação de linhas."
+                    )
+                df_di_pre_merge = df_di_pre_merge.drop_duplicates(
+                    subset=['meses_ate_recebimento'],
+                    keep='first'
+                )
             
             # Merge direto usando meses_ate_recebimento (ULTRA-RÁPIDO)
+            registros_antes_merge = len(df_final_temp)
             df_final_temp = df_final_temp.merge(
                 df_di_pre_merge,
                 on='meses_ate_recebimento',
-                how='left'
+                how='left',
+                validate='m:1'
             )
+
+            if len(df_final_temp) != registros_antes_merge:
+                with log_container:
+                    st.warning(
+                        f"⚠️ Merge DI-PRE alterou contagem de linhas "
+                        f"({registros_antes_merge:,} → {len(df_final_temp):,})."
+                    )
             
             # Para registros sem match exato, buscar o mais próximo
             mask_sem_taxa = df_final_temp['taxa_di_pre_percentual'].isna()
@@ -187,22 +286,21 @@ class CalculadorValorJustoDistribuidoras:
             if registros_sem_taxa > 0:
                 with log_container:
                     st.info(f"📊 **Buscando taxas mais próximas** para {registros_sem_taxa:,} registros...")
-                
-                # Para cada prazo único sem taxa, encontrar o mais próximo
-                prazos_sem_taxa = df_final_temp[mask_sem_taxa]['meses_ate_recebimento'].unique()
-                
-                for prazo in prazos_sem_taxa:
-                    # Calcular distância para todos os prazos disponíveis no DI-PRE
-                    df_di_pre['diferenca'] = abs(df_di_pre['meses_futuros'] - prazo)
-                    linha_mais_proxima = df_di_pre.loc[df_di_pre['diferenca'].idxmin()]
-                    taxa_proxima = linha_mais_proxima['252']
-                    
-                    # Aplicar para todos os registros com esse prazo
-                    mask_prazo = (df_final_temp['meses_ate_recebimento'] == prazo) & mask_sem_taxa
-                    df_final_temp.loc[mask_prazo, 'taxa_di_pre_percentual'] = taxa_proxima
-                    
-                    with log_container:
-                        st.info(f"📊 Prazo {prazo}m → CDI {taxa_proxima:.3f}% (mais próximo: {linha_mais_proxima['meses_futuros']}m)")
+
+                prazos_disponiveis = df_di_pre_merge['meses_ate_recebimento'].to_numpy()
+                taxas_disponiveis = df_di_pre_merge['taxa_di_pre_percentual'].to_numpy()
+
+                prazos_sem_taxa = pd.to_numeric(
+                    df_final_temp.loc[mask_sem_taxa, 'meses_ate_recebimento'],
+                    errors='coerce'
+                ).fillna(6).astype(int).to_numpy()
+
+                idx_mais_proximo = np.abs(
+                    prazos_sem_taxa[:, None] - prazos_disponiveis[None, :]
+                ).argmin(axis=1)
+                taxas_proximas = taxas_disponiveis[idx_mais_proximo]
+
+                df_final_temp.loc[mask_sem_taxa, 'taxa_di_pre_percentual'] = taxas_proximas
             
             # Converter percentual para decimal
             df_final_temp['taxa_di_pre_decimal'] = df_final_temp['taxa_di_pre_percentual'] / 100
@@ -233,33 +331,31 @@ class CalculadorValorJustoDistribuidoras:
         # Converter taxa anual para mensal: (1 + taxa_anual)^(1/12) - 1
         df_final_temp['taxa_desconto_mensal'] = (1 + df_final_temp['taxa_di_pre_total_anual']) ** (1/12) - 1
             
-        # Data estimada de recebimento (data_base + meses_ate_recebimento)
-        def calcular_data_recebimento(row):
-            try:
-                data_base = row.get('data_base', datetime.now())
-                meses = row.get('meses_ate_recebimento', 30)
-                return pd.to_datetime(data_base) + pd.DateOffset(months=int(meses))
-            except:
-                return datetime.now() + pd.DateOffset(months=30)
-        
-        df_final_temp['data_recebimento_estimada'] = df_final_temp.apply(calcular_data_recebimento, axis=1)
+        # Data estimada de recebimento por calendário real (sem aproximação de 30 dias)
+        data_base = pd.to_datetime(df_final_temp.get('data_base'), errors='coerce').fillna(pd.Timestamp(datetime.now()))
+        meses = pd.to_numeric(df_final_temp.get('meses_ate_recebimento'), errors='coerce').fillna(30).astype(int)
+
+        df_final_temp['data_recebimento_estimada'] = self._somar_meses_calendario(
+            data_base=data_base,
+            meses=meses,
+        )
         
         return df_final_temp
     
     def _calcular_ipca_mensal(self, df_final_temp, log_container):
         """Calcula o IPCA mensal baseado nos índices carregados"""
         
-        st.info("📊 Calculando IPCA/IGPM mensal real baseado nos índices carregados...")
+        st.info("📊 Calculando IPCA/IGPM com sazonalidade histórica (média móvel de 3 anos por mês)...")
 
-        # Buscar data atual e data de 12 meses atrás nos dados carregados
-        data_hoje = datetime.now()
-        data_12m_atras = data_hoje - pd.DateOffset(months=12)
-        
-        # Formatar datas para busca (YYYY.MM)
-        data_hoje_formatada = data_hoje.strftime('%Y.%m')
-        data_12m_formatada = data_12m_atras.strftime('%Y.%m')
-        
-        # ========== SELEÇÃO INTELIGENTE DOS ÍNDICES PARA CÁLCULO IPCA ==========
+        # Data base de referência da carteira (usa a data predominante; fallback para hoje)
+        data_base_serie = pd.to_datetime(df_final_temp.get('data_base'), errors='coerce')
+        data_base_validas = data_base_serie.dropna()
+        if data_base_validas.empty:
+            data_base_ref = pd.Timestamp(datetime.now())
+        else:
+            data_base_ref = pd.Timestamp(data_base_validas.mode().iloc[0])
+
+        # ========== SELEÇÃO DOS ÍNDICES PARA CÁLCULO ==========
         if 'df_indices_economicos' in st.session_state:
             df_indices = st.session_state.df_indices_economicos.copy()
             tipo_calculo = "IGPM_IPCA (Distribuidoras)"
@@ -267,65 +363,169 @@ class CalculadorValorJustoDistribuidoras:
             df_indices = st.session_state.df_indices_igpm.copy()
             tipo_calculo = "IGPM (Fallback)"
         else:
-            raise Exception("Nenhum índice disponível para cálculo do IPCA")
-        
-        st.info(f"📊 Usando {tipo_calculo} para cálculo do IPCA mensal")
-        df_indices['data_formatada'] = df_indices['data'].dt.strftime('%Y.%m')
-        
-        # Buscar índice atual (mais próximo da data de hoje)
-        indice_atual = None
-        indice_12m = None
-        
-        # Tentar encontrar índice exato, senão buscar o mais próximo
-        filtro_atual = df_indices[df_indices['data_formatada'] == data_hoje_formatada]
-        if not filtro_atual.empty:
-            indice_atual = filtro_atual.iloc[0]['indice']
+            df_indices = pd.DataFrame()
+            tipo_calculo = "Sem índices"
+
+        st.info(f"📊 Usando {tipo_calculo} para projeção sazonal determinística")
+
+        # Fallback padrão fixo (último recurso)
+        ipca_mensal_fallback = 0.0037  # ~4.53% a.a.
+        ipca_anual_fallback = (1 + ipca_mensal_fallback) ** 12 - 1
+
+        if not df_indices.empty and {'data', 'indice'}.issubset(df_indices.columns):
+            df_indices = df_indices.copy()
+            df_indices['data'] = pd.to_datetime(df_indices['data'], errors='coerce')
+            df_indices['indice'] = pd.to_numeric(df_indices['indice'], errors='coerce')
+            df_indices = df_indices.dropna(subset=['data', 'indice']).sort_values('data').reset_index(drop=True)
         else:
-            # Buscar o mais recente disponível
-            df_indices_ordenado = df_indices.sort_values('data', ascending=False)
-            indice_atual = df_indices_ordenado.iloc[0]['indice']
-            st.info(f"📅 Usando índice mais recente disponível: {df_indices_ordenado.iloc[0]['data'].strftime('%Y-%m')}")
-        
-        # Buscar índice de 12 meses atrás
-        filtro_12m = df_indices[df_indices['data_formatada'] == data_12m_formatada]
-        if not filtro_12m.empty:
-            indice_12m = filtro_12m.iloc[0]['indice']
-        else:
-            # Buscar o mais próximo de 12 meses atrás
-            df_indices['diferenca_12m'] = abs((df_indices['data'] - data_12m_atras).dt.days)
-            indice_mais_proximo_12m = df_indices.loc[df_indices['diferenca_12m'].idxmin()]
-            indice_12m = indice_mais_proximo_12m['indice']
-            st.info(f"📅 Usando índice mais próximo de 12m atrás: {indice_mais_proximo_12m['data'].strftime('%Y-%m')}")
-        
-        # Calcular IPCA anual e mensal
-        if indice_atual and indice_12m and indice_12m > 0:
-            # IPCA anual = (índice_atual / índice_12m_atrás) - 1
-            ipca_anual = (indice_atual / indice_12m) - 1
-            
-            # IPCA mensal = (1 + ipca_anual)^(1/12) - 1
-            ipca_mensal_calculado = ((1 + ipca_anual) ** (1/12)) - 1
-            
-            # Aplicar o IPCA mensal calculado para todos os registros
-            df_final_temp['ipca_mensal'] = ipca_mensal_calculado
-            
+            df_indices = pd.DataFrame(columns=['data', 'indice'])
+
+        if not df_indices.empty:
+            # Regra: se não existir índice da data base atual, usa o último disponível até a data base.
+            # Se não houver nenhum até a data base, usa o último da série.
+            df_ate_data_base = df_indices[df_indices['data'] <= data_base_ref]
+            usou_fallback_data_base = False
+
+            if not df_ate_data_base.empty:
+                linha_ref = df_ate_data_base.iloc[-1]
+                data_ref = pd.Timestamp(linha_ref['data'])
+                indice_atual_num = float(linha_ref['indice'])
+                if data_ref.to_period('M') != data_base_ref.to_period('M'):
+                    usou_fallback_data_base = True
+            else:
+                linha_ref = df_indices.iloc[-1]
+                data_ref = pd.Timestamp(linha_ref['data'])
+                indice_atual_num = float(linha_ref['indice'])
+                usou_fallback_data_base = True
+
+            if usou_fallback_data_base:
+                st.warning(
+                    "⚠️ Índice da competência da data base não encontrado. "
+                    f"Usando último índice disponível em {data_ref.strftime('%Y-%m')} "
+                    "como referência para a projeção."
+                )
+
+            # Série mensal consolidada (último índice de cada mês)
+            df_mensal = (
+                df_indices
+                .assign(periodo=df_indices['data'].dt.to_period('M'))
+                .sort_values('data')
+                .groupby('periodo', as_index=False)
+                .agg(data=('data', 'max'), indice=('indice', 'last'))
+                .sort_values('data')
+                .reset_index(drop=True)
+            )
+            df_mensal['taxa_mensal'] = df_mensal['indice'].pct_change()
+
+            # Histórico elegível para sazonalidade: até a data de referência
+            df_taxas_hist = df_mensal[
+                (df_mensal['data'] <= data_ref) & df_mensal['taxa_mensal'].notna()
+            ].copy()
+            df_taxas_hist['mes'] = df_taxas_hist['data'].dt.month
+
+            # Taxa global de segurança: média dos últimos 12 meses válidos
+            if not df_taxas_hist.empty:
+                taxa_global = float(df_taxas_hist['taxa_mensal'].tail(12).mean())
+            else:
+                taxa_global = float(ipca_mensal_fallback)
+
+            if pd.isna(taxa_global):
+                taxa_global = float(ipca_mensal_fallback)
+
+            # Regra 2 (sazonalidade): para cada mês futuro, usa média dos mesmos meses
+            # dos últimos 3 anos observados (até 3 observações por mês).
+            mapa_taxa_mes = {}
+            for mes in range(1, 13):
+                taxas_mes = df_taxas_hist.loc[df_taxas_hist['mes'] == mes, 'taxa_mensal'].tail(3)
+                if not taxas_mes.empty:
+                    mapa_taxa_mes[mes] = float(taxas_mes.mean())
+                else:
+                    mapa_taxa_mes[mes] = float(taxa_global)
+
+            periodo_ref = data_ref.to_period('M')
+            taxas_projetadas_12 = []
+            for passo in range(1, 13):
+                periodo_futuro = periodo_ref + passo
+                taxa_mes = mapa_taxa_mes.get(periodo_futuro.month, taxa_global)
+                taxas_projetadas_12.append(float(taxa_mes))
+
+            taxas_projetadas_arr = np.array(taxas_projetadas_12, dtype=float)
+
+            # IPCA mensal reportado = primeira taxa projetada (mês imediatamente após referência)
+            ipca_mensal_calculado = float(taxas_projetadas_arr[0]) if len(taxas_projetadas_arr) > 0 else float(taxa_global)
+
+            # IPCA anual reportado = composição das próximas 12 taxas projetadas
+            if len(taxas_projetadas_arr) > 0:
+                ipca_anual = float(np.prod(1.0 + taxas_projetadas_arr) - 1.0)
+            else:
+                ipca_anual = float((1.0 + ipca_mensal_calculado) ** 12 - 1.0)
+
+            df_final_temp['ipca_anual'] = float(ipca_anual)
+            df_final_temp['ipca_mensal'] = float(ipca_mensal_calculado)
+
             st.success(f"""
-            ✅ **IPCA mensal calculado com dados reais do Excel!**
-            📊 Índice Atual: {indice_atual:.2f}
-            📊 Índice 12m Atrás: {indice_12m:.2f}
-            📈 IPCA Anual: {ipca_anual*100:.2f}%
-            🔢 IPCA Mensal: {ipca_mensal_calculado*100:.4f}%
+            ✅ **IPCA sazonal calculado com histórico real!**
+            📅 Data base de referência: {data_base_ref.strftime('%Y-%m')}
+            📊 Índice de referência: {indice_atual_num:.6f} ({data_ref.strftime('%Y-%m')})
+            📈 IPCA Anual Projetado (12m): {ipca_anual*100:.2f}%
+            🔢 IPCA Mensal Projetado (m+1): {ipca_mensal_calculado*100:.4f}%
             """)
-            
         else:
-            # Fallback se não conseguir calcular
-            df_final_temp['ipca_mensal'] = 0.0037  # 4.5% ao ano
-            st.warning("⚠️ Não foi possível calcular IPCA dos dados. Usando taxa padrão de 4.5% a.a.")
-        
-        # Calcular o fator de correção com IPCA
-        df_final_temp['fator_correcao_ate_recebimento'] = (1 + df_final_temp['ipca_mensal']) ** df_final_temp['meses_ate_recebimento']
+            df_final_temp['ipca_anual'] = float(ipca_anual_fallback)
+            df_final_temp['ipca_mensal'] = float(ipca_mensal_fallback)
+
+            st.warning(
+                "⚠️ Não foi possível usar histórico de índices para sazonalidade. "
+                f"Aplicando fallback fixo: IPCA mensal={ipca_mensal_fallback:.6f} "
+                f"(IPCA anual implícito={ipca_anual_fallback*100:.2f}%)."
+            )
+
+        # Esses campos foram descontinuados e não devem seguir no output final.
+        colunas_descontinuadas = ['indice_atual', 'indice_12m']
+        colunas_presentes = [col for col in colunas_descontinuadas if col in df_final_temp.columns]
+        if colunas_presentes:
+            df_final_temp = df_final_temp.drop(columns=colunas_presentes)
+
+        # Mantém a fórmula original do fator de correção até recebimento.
+        meses_recebimento_num = pd.to_numeric(
+            df_final_temp.get('meses_ate_recebimento'), errors='coerce'
+        ).fillna(0).clip(lower=0)
+        df_final_temp['fator_correcao_ate_recebimento'] = (1 + df_final_temp['ipca_mensal']) ** meses_recebimento_num
+
+        # Calcular mora simples de 1% a.m. até o recebimento
+        valor_corrigido_base = pd.to_numeric(df_final_temp.get('valor_corrigido'), errors='coerce').fillna(0.0)
+        fator_correcao_receb = pd.to_numeric(df_final_temp.get('fator_correcao_ate_recebimento'), errors='coerce').fillna(1.0)
+        df_final_temp['mora_ate_recebimento'] = (valor_corrigido_base * 0.01 * meses_recebimento_num).clip(lower=0)
+
+        # Calcular valor corrigido até recebimento com correção monetária + mora até o recebimento
+        df_final_temp['valor_corrigido_ate_recebimento'] = (
+            valor_corrigido_base * fator_correcao_receb
+            + df_final_temp['mora_ate_recebimento']
+        )
+
+        # Garantir posição das colunas logo após o fator de correção
+        col_mora_receb = 'mora_ate_recebimento'
+        col_valor_receb = 'valor_corrigido_ate_recebimento'
+        col_fator_receb = 'fator_correcao_ate_recebimento'
+        if (
+            col_fator_receb in df_final_temp.columns
+            and col_mora_receb in df_final_temp.columns
+            and col_valor_receb in df_final_temp.columns
+        ):
+            colunas_ordenadas = [
+                col for col in df_final_temp.columns
+                if col not in {col_mora_receb, col_valor_receb}
+            ]
+            idx_fator = colunas_ordenadas.index(col_fator_receb) + 1
+            colunas_ordenadas.insert(idx_fator, col_mora_receb)
+            colunas_ordenadas.insert(idx_fator + 1, col_valor_receb)
+            df_final_temp = df_final_temp[colunas_ordenadas]
 
         # Aplicar taxa de desconto
-        df_final_temp['fator_de_desconto'] = (1 + df_final_temp['taxa_desconto_mensal'] ) ** df_final_temp['meses_ate_recebimento']
+        df_final_temp['fator_de_desconto'] = self._potencia_composta_estavel(
+            df_final_temp.get('taxa_desconto_mensal', 0),
+            df_final_temp.get('meses_ate_recebimento', 0),
+        )
         
         # Calcular multa por atraso
         data_atual = datetime.now()
@@ -342,78 +542,53 @@ class CalculadorValorJustoDistribuidoras:
         return df_final_temp
     
     def _calcular_valor_justo_final(self, df_final_temp, log_container):
-        """Calcula o valor justo final conforme orientação do Thiago"""
+        """Calcula valor recuperável até recebimento e prepara fator de desconto.
         
-        # ===== PASSO 1: VERIFICAR SE TEMOS VALOR RECUPERÁVEL =====
-        if 'valor_recuperavel_ate_recebimento' not in df_final_temp.columns:
-            if 'taxa_recuperacao' in df_final_temp.columns:
-                # Calcular valor recuperável = valor_corrigido × taxa_recuperacao
-                df_final_temp['valor_recuperavel_ate_recebimento'] = df_final_temp['valor_corrigido'] * df_final_temp['taxa_recuperacao']
-            else:
-                # Fallback: valor recuperável = valor corrigido (100% de recuperação)
-                df_final_temp['valor_recuperavel_ate_recebimento'] = df_final_temp['valor_corrigido']
+        A sequência final de cálculo do valor justo continua em
+        `calcular_valor_justo_reajustado` (calculador_correcao.py).
+        """
         
-        # ===== PASSO 2: USAR TAXAS CDI JÁ CALCULADAS NO MERGE OTIMIZADO =====
+        # ===== PASSO 1: VALOR RECUPERÁVEL ATÉ RECEBIMENTO =====
+        valor_corrigido_recebimento = pd.to_numeric(
+            df_final_temp.get('valor_corrigido_ate_recebimento', 0),
+            errors='coerce'
+        ).fillna(0.0)
+
+        if 'taxa_recuperacao' in df_final_temp.columns:
+            taxa_recuperacao = pd.to_numeric(df_final_temp['taxa_recuperacao'], errors='coerce').fillna(0.0)
+            df_final_temp['valor_recuperavel_ate_recebimento'] = (valor_corrigido_recebimento * taxa_recuperacao).clip(lower=0)
+        else:
+            df_final_temp['valor_recuperavel_ate_recebimento'] = 0.0
+
+        # ===== PASSO 2: TAXAS CDI + SPREAD =====
         with log_container:
             st.info("📊 **Usando taxas CDI** já calculadas no merge vetorizado...")
-        
-        # As taxas CDI já foram calculadas no merge otimizado acima
-        # Usamos 'taxa_di_pre_decimal' que já contém as taxas específicas por prazo
-        df_final_temp['cdi_taxa_prazo'] = df_final_temp['taxa_di_pre_decimal']
-        
-        # ===== PASSO 3: APLICAR SPREAD DE RISCO DE 2.5% =====
-        spread_risco = 0.025  # 2.5% a.a.
-        df_final_temp['taxa_desconto_total'] = df_final_temp['cdi_taxa_prazo'] + spread_risco
-        
-        # ===== PASSO 4: CALCULAR FATOR DE DESCONTO CONFORME THIAGO =====
-        # Fórmula: (1 + CDI + 2,5%)^(prazo_recebimento/12)
-        df_final_temp['anos_ate_recebimento'] = df_final_temp['meses_ate_recebimento'] / 12
-        df_final_temp['fator_desconto_thiago'] = (1 + df_final_temp['taxa_desconto_total']) ** df_final_temp['anos_ate_recebimento']
-        
-        # ===== PASSO 5: CÁLCULO FINAL DO VALOR JUSTO =====
-        # Fórmula do Thiago: Valor Justo = Valor Recuperável ÷ (1 + CDI + 2,5%)^(prazo_recebimento/12)
-        df_final_temp['valor_justo_ate_recebimento'] = df_final_temp['valor_recuperavel_ate_recebimento'] / df_final_temp['fator_desconto_thiago']
-        
-        # ===== PASSO 6: ESTATÍSTICAS DO CÁLCULO =====
-        with log_container:
-            valor_total_recuperavel = df_final_temp['valor_recuperavel_ate_recebimento'].sum()
-            valor_total_justo = df_final_temp['valor_justo_ate_recebimento'].sum()
-            desconto_percentual = (1 - valor_total_justo / valor_total_recuperavel) * 100
-            
-            st.success(f"""
-            ✅ **Valor Justo calculado conforme Thiago!**
-            💰 Total Recuperável: R$ {valor_total_recuperavel:,.2f}
-            💎 Total Valor Justo: R$ {valor_total_justo:,.2f}
-            📉 Desconto Aplicado: {desconto_percentual:.2f}%
-            
-            🔢 **Fórmula:** Valor Recuperável ÷ (1 + CDI + 2,5%)^(meses/12)
-            📊 **Spread:** CDI + 2,5% a.a.
-            📅 **Base:** 18/09/2025 + prazo recuperação
-            """)
-            
-            # Mostrar distribuição por prazo
-            distribuicao_prazo = df_final_temp.groupby('meses_ate_recebimento').agg({
-                'valor_justo_ate_recebimento': 'sum',
-                'taxa_desconto_total': 'first'
-            }).reset_index()
-            
-            st.write("**📊 Distribuição por Prazo:**")
-            for _, row in distribuicao_prazo.iterrows():
-                prazo = int(row['meses_ate_recebimento'])
-                valor = row['valor_justo_ate_recebimento']
-                taxa = row['taxa_desconto_total'] * 100
-                st.info(f"📅 {prazo}m: R$ {valor:,.2f} (taxa {taxa:.2f}%)")
-        
-        # ===== ADICIONAR COLUNAS DE CONTROLE =====
-        df_final_temp['data_calculo'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # Calcular valor_recuperavel_ate_recebimento
-        df_final_temp['valor_recuperavel_ate_recebimento'] = (
-            df_final_temp['valor_recuperavel_ate_data_base'] * (df_final_temp['fator_correcao_ate_recebimento'] + df_final_temp['multa_final'])
+        df_final_temp['cdi_taxa_prazo'] = df_final_temp['taxa_di_pre_decimal']
+
+        spread_risco = 0.025  # 2.5% a.a.
+        df_final_temp['taxa_desconto_total'] = (
+            (1 + df_final_temp['cdi_taxa_prazo']) * (1 + spread_risco)
+        ) - 1
+
+        # ===== PASSO 3: FATOR DE DESCONTO =====
+        df_final_temp['anos_ate_recebimento'] = df_final_temp['meses_ate_recebimento'] / 12
+        df_final_temp['fator_de_desconto_vp'] = self._potencia_composta_estavel(
+            df_final_temp.get('taxa_desconto_total', 0),
+            df_final_temp.get('anos_ate_recebimento', 0),
         )
 
-        # Remove a coluna 'valor_recuperavel_ate_recebimento' se existir
-        if 'valor_recuperavel_ate_recebimento' in df_final_temp.columns:
-            df_final_temp = df_final_temp.drop(columns=['valor_recuperavel_ate_recebimento'])
-        
+        # ===== ESTATÍSTICAS =====
+        with log_container:
+            valor_total_recuperavel = df_final_temp['valor_recuperavel_ate_recebimento'].sum()
+            st.success(f"""
+            ✅ **Valor Recuperável até Recebimento calculado!**
+            💰 Total Recuperável: R$ {valor_total_recuperavel:,.2f}
+            
+            🔢 Próxima etapa: aplicar remuneração variável e trazer a valor presente.
+            """)
+
+        # ===== COLUNA DE CONTROLE =====
+        df_final_temp['data_calculo'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         return df_final_temp

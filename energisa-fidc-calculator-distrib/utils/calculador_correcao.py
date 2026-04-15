@@ -6,9 +6,12 @@ Baseado no notebook original
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import logging
 import streamlit as st
 from .calculador_voltz import CalculadorVoltz
 from .calculador_remuneracao_variavel import CalculadorRemuneracaoVariavel
+
+logger = logging.getLogger(__name__)
 
 
 class CalculadorCorrecao:
@@ -530,10 +533,9 @@ class CalculadorCorrecao:
     
     def calcular_valor_justo_reajustado(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calcula valor justo reajustado aplicando descontos por faixa de aging.
-        
-        Agora utiliza o novo sistema modular de remuneração variável que permite
-        diferentes configurações por distribuidora.
+        Calcula valor justo final:
+        1. Aplica remuneração variável sobre valor_recuperavel_ate_recebimento
+        2. Traz a valor presente dividindo pelo fator de desconto
         
         Descontos por aging (configuração padrão):
         - A vencer: 6,5%
@@ -546,23 +548,62 @@ class CalculadorCorrecao:
         - De 720 a 1080 dias: 36,0%
         - Maior que 1080 dias: 50,0%
         """
+        if df is None:
+            st.warning("⚠️ DataFrame nulo em calcular_valor_justo_reajustado. Continuando com DataFrame vazio.")
+            return pd.DataFrame()
+
         if df.empty:
             return df
-        
-        # Verificar se temos valor_justo
-        if 'valor_justo_ate_recebimento' not in df.columns:
-            st.warning("⚠️ Coluna 'valor_justo_ate_recebimento' não encontrada. Calculando valor justo reajustado apenas com valor corrigido.")
-            df['valor_justo_ate_recebimento'] = df.get('valor_corrigido', 0)
-        
-        # Usar o novo calculador de remuneração variável
+
+        # Garantir que temos a coluna-base para RV
+        if 'valor_recuperavel_ate_recebimento' not in df.columns:
+            st.warning("⚠️ Coluna 'valor_recuperavel_ate_recebimento' não encontrada. Mantendo cálculo com zero.")
+            df['valor_recuperavel_ate_recebimento'] = 0.0
+
+        # Aplicar remuneração variável sobre o valor recuperável até recebimento
         calculador_rv = CalculadorRemuneracaoVariavel(distribuidora="PADRAO")
-        df_resultado = calculador_rv.calcular_remuneracao_variavel(df)
-        
-        # Manter compatibilidade com o código existente
-        df_resultado['valor_justo_pos_rv'] = df_resultado['remuneracao_variavel_valor_final']
-        
+        df_resultado = calculador_rv.calcular_remuneracao_variavel(
+            df, coluna_valor='valor_recuperavel_ate_recebimento'
+        )
+
+        if df_resultado is None:
+            st.warning("⚠️ Remuneração variável retornou vazio. Continuando com valores zerados.")
+            df_resultado = df.copy()
+            df_resultado['remuneracao_variavel_valor_final'] = pd.to_numeric(
+                df_resultado.get('valor_recuperavel_ate_recebimento', 0), errors='coerce'
+            ).fillna(0)
+
+        # Renomear coluna final pós-RV conforme nomenclatura de negócio
+        if 'remuneracao_variavel_valor_final' in df_resultado.columns:
+            df_resultado['valor_recebimento_pos_rv'] = pd.to_numeric(
+                df_resultado['remuneracao_variavel_valor_final'], errors='coerce'
+            ).fillna(0.0)
+            df_resultado = df_resultado.drop(columns=['remuneracao_variavel_valor_final'])
+        elif 'valor_recebimento_pos_rv' not in df_resultado.columns:
+            df_resultado['valor_recebimento_pos_rv'] = 0.0
+
+        # Trazer a valor presente: valor_justo = (recuperavel - RV) / fator_desconto
+        fator_desconto = pd.to_numeric(
+            df_resultado.get('fator_de_desconto_vp', df_resultado.get('fator_de_desconto')),
+            errors='coerce'
+        ).fillna(0.0)
+
+        fator_desconto_arr = pd.to_numeric(fator_desconto, errors='coerce').fillna(0.0).to_numpy(dtype=np.longdouble)
+        valor_pos_rv_arr = pd.to_numeric(
+            df_resultado['valor_recebimento_pos_rv'], errors='coerce'
+        ).fillna(0.0).to_numpy(dtype=np.longdouble)
+
+        df_resultado['valor_justo'] = np.where(
+            fator_desconto_arr > 0,
+            (valor_pos_rv_arr / fator_desconto_arr).astype(np.float64),
+            0.0,
+        )
+        df_resultado['valor_justo'] = pd.to_numeric(df_resultado['valor_justo'], errors='coerce').fillna(0.0).clip(lower=0)
+
         # Gerar resumo usando o novo sistema
-        with st.spinner("💎 Calculando valor justo reajustado..."):
-            resumo = calculador_rv.gerar_resumo_remuneracao(df_resultado)
+        with st.spinner("💎 Calculando valor justo..."):
+            resumo = calculador_rv.gerar_resumo_remuneracao(
+                df_resultado, coluna_valor='valor_recuperavel_ate_recebimento'
+            )
 
         return df_resultado

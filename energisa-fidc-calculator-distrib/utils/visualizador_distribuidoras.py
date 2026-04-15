@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+from .exportacao_csv_brasil import salvar_csv_brasil
+
 
 class VisualizadorDistribuidoras:
     """
@@ -64,75 +66,50 @@ class VisualizadorDistribuidoras:
         Exibe métricas principais das distribuidoras
         """
         st.write("**📊 Métricas Principais:**")
-        
-        # Primeira linha de métricas
+
+        total_registros = len(df_final)
+        empresas = df_final['empresa'].nunique() if 'empresa' in df_final.columns else 0
+
+        coluna_principal = 'valor_principal_limpo' if 'valor_principal_limpo' in df_final.columns else 'valor_principal'
+        total_principal = df_final[coluna_principal].sum() if coluna_principal in df_final.columns else 0
+
+        if 'correcao_monetaria' in df_final.columns:
+            total_correcao_monetaria = df_final['correcao_monetaria'].sum()
+        else:
+            total_corrigido = df_final['valor_corrigido'].sum() if 'valor_corrigido' in df_final.columns else 0
+            total_liquido = df_final['valor_liquido'].sum() if 'valor_liquido' in df_final.columns else 0
+            total_correcao_monetaria = max(total_corrigido - total_liquido, 0)
+
+        coluna_valor_justo = None
+        if tem_valor_justo_reajustado and 'valor_justo_reajustado' in df_final.columns:
+            coluna_valor_justo = 'valor_justo_reajustado'
+        elif tem_valor_justo and 'valor_justo' in df_final.columns:
+            coluna_valor_justo = 'valor_justo'
+
+        total_valor_justo = df_final[coluna_valor_justo].sum() if coluna_valor_justo else 0
+
         col1, col2, col3, col4, col5 = st.columns(5)
-        
+
         with col1:
-            total_registros = len(df_final)
             st.metric("📊 Total Registros", f"{total_registros:,}")
-        
+
         with col2:
-            if tem_basicas:
-                total_principal = df_final['valor_principal'].sum()
-                st.metric("💰 Valor Principal", f"R$ {total_principal:,.2f}")
-            else:
-                st.metric("💰 Valor Principal", "N/A")
-        
+            st.metric("📊 Valor Principal", f"R$ {total_principal:,.2f}")
+
         with col3:
-            if tem_basicas:
-                total_liquido = df_final['valor_liquido'].sum()
-                st.metric("💧 Valor Líquido", f"R$ {total_liquido:,.2f}")
-            else:
-                st.metric("💧 Valor Líquido", "N/A")
-        
+            st.metric("⚡ Correção Monetária", f"R$ {total_correcao_monetaria:,.2f}")
+
         with col4:
-            if tem_basicas:
-                total_corrigido = df_final['valor_corrigido'].sum()
-                st.metric("⚡ Valor Corrigido", f"R$ {total_corrigido:,.2f}")
+            if coluna_valor_justo:
+                st.metric("💎 Valor Justo", f"R$ {total_valor_justo:,.2f}")
             else:
-                st.metric("⚡ Valor Corrigido", "N/A")
-        
+                st.metric("💎 Valor Justo", "N/A")
+
         with col5:
-            if tem_recuperacao:
-                total_recuperavel = df_final['valor_recuperavel_ate_recebimento'].sum()
-                st.metric("📈 Valor Recuperável", f"R$ {total_recuperavel:,.2f}")
-            else:
-                st.metric("📈 Valor Recuperável", "N/A")
-        
-        # Segunda linha de métricas
-        if tem_valor_justo or tem_valor_justo_reajustado:
-            st.write("")
-            if tem_valor_justo_reajustado:
-                col1, col2, col3, col4 = st.columns(4)
-            else:
-                col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if tem_valor_justo:
-                    total_valor_justo = df_final['valor_justo'].sum()
-                    st.metric("💎 Valor Justo", f"R$ {total_valor_justo:,.2f}")
-                else:
-                    st.metric("💎 Valor Justo", "N/A")
-            
-            with col2:
-                if tem_valor_justo_reajustado:
-                    total_desconto = df_final['desconto_aging_valor'].sum()
-                    st.metric("📉 Desconto Aging", f"R$ {total_desconto:,.2f}")
-                else:
-                    st.metric("📉 Desconto Aging", "N/A")
-            
-            with col3:
-                if tem_valor_justo_reajustado:
-                    total_valor_justo_reaj = df_final['valor_justo_reajustado'].sum()
-                    st.metric("🔥 Valor Justo Reajustado", f"R$ {total_valor_justo_reaj:,.2f}")
-                else:
-                    st.metric("🔥 Valor Justo Final", "N/A")
-            
-            if tem_valor_justo_reajustado:
-                with col4:
-                    empresas = df_final['empresa'].nunique()
-                    st.metric("🏢 Empresas", f"{empresas}")
+            st.metric("🏢 Empresas", f"{empresas}")
+
+        if coluna_valor_justo == 'valor_justo_reajustado':
+            st.caption("Valor Justo exibido com base em valor_justo_reajustado (pós-RV).")
     
     def _exibir_detalhes_di_pre(self, df_final: pd.DataFrame):
         """
@@ -422,6 +399,7 @@ class VisualizadorDistribuidoras:
             'di_pre_taxa_anual', 'taxa_di_pre_total_anual', 'taxa_desconto_mensal',
             'data_recebimento_estimada', 'meses_ate_recebimento', 'ipca_mensal',
             'fator_de_desconto', 'multa_atraso', 'multa_final', 'fator_correcao_ate_recebimento',
+            'mora_ate_recebimento', 'valor_corrigido_ate_recebimento',
             'valor_recuperavel_ate_data_base', 'valor_recuperavel_ate_recebimento', 'valor_justo',
             'valor_justo_reajustado', 'desconto_aging_perc', 'desconto_aging_valor'
         ]
@@ -451,8 +429,8 @@ class VisualizadorDistribuidoras:
                 colunas_restantes_completo = [col for col in df_export.columns if col not in colunas_ordem_usuario]
                 df_export = df_export[colunas_existentes_completo + colunas_restantes_completo]
                 
-                # Salvar arquivo
-                df_export.to_csv(caminho_arquivo, index=False, encoding='utf-8-sig', sep=';', decimal=',')
+                # Salvar arquivo no formato brasileiro com truncamento para 2 casas
+                df_export = salvar_csv_brasil(df_export, caminho_arquivo, casas_decimais=4)
                 
                 st.success(f"✅ **Dados salvos com sucesso!**")
                 st.info(f"📄 **Arquivo:** `{nome_arquivo}`")
