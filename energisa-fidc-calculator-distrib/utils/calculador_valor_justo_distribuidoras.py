@@ -571,11 +571,14 @@ class CalculadorValorJustoDistribuidoras:
             (1 + df_final_temp['cdi_taxa_prazo']) * (1 + spread_risco)
         ) - 1
 
-        # ===== PASSO 3: FATOR DE DESCONTO =====
-        df_final_temp['anos_ate_recebimento'] = df_final_temp['meses_ate_recebimento'] / 12
+        # ===== PASSO 3: FATOR DE DESCONTO (base 360 dias) =====
+        data_base_dt = pd.to_datetime(df_final_temp['data_base'], errors='coerce').fillna(pd.Timestamp(datetime.now()))
+        meses_rec = pd.to_numeric(df_final_temp['meses_ate_recebimento'], errors='coerce').fillna(0)
+        df_final_temp['dias_ate_recebimento'] = meses_rec * 30
+        df_final_temp['data_ate_recebimento'] = data_base_dt + pd.to_timedelta(df_final_temp['dias_ate_recebimento'], unit='D')
         df_final_temp['fator_de_desconto_vp'] = self._potencia_composta_estavel(
             df_final_temp.get('taxa_desconto_total', 0),
-            df_final_temp.get('anos_ate_recebimento', 0),
+            df_final_temp['dias_ate_recebimento'] / 360,
         )
 
         # ===== ESTATÍSTICAS =====

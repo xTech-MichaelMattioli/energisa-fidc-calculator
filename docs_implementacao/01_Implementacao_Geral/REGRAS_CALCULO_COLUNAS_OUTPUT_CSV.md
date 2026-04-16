@@ -94,8 +94,9 @@ O processamento acontece nas seguintes etapas, nessa ordem:
 | valor_recuperavel_ate_recebimento | `max(valor_corrigido_ate_recebimento × taxa_recuperacao, 0)`. | `_calcular_valor_justo_final` |
 | cdi_taxa_prazo | Copia de `taxa_di_pre_decimal`. | `_calcular_valor_justo_final` |
 | taxa_desconto_total | `((1 + cdi_taxa_prazo) × (1 + 0.025)) - 1`. | `_calcular_valor_justo_final` |
-| anos_ate_recebimento | `meses_ate_recebimento / 12`. | `_calcular_valor_justo_final` |
-| fator_de_desconto_vp | `(1 + taxa_desconto_total) ^ anos_ate_recebimento`. | `_calcular_valor_justo_final` |
+| dias_ate_recebimento | `meses_ate_recebimento × 30` — cada mês conta como 30 dias. | `_calcular_valor_justo_final` |
+| data_ate_recebimento | `data_base + dias_ate_recebimento` (informativo). | `_calcular_valor_justo_final` |
+| fator_de_desconto_vp | `(1 + taxa_desconto_total) ^ (dias_ate_recebimento / 360)`. | `_calcular_valor_justo_final` |
 | data_calculo | `datetime.now()` formatado `%Y-%m-%d %H:%M:%S`. | `_calcular_valor_justo_final` |
 
 ### Etapa 6 — Remuneracao variavel e valor justo final
@@ -182,7 +183,9 @@ valor_corrigido_ate_recebimento = valor_corrigido × fator_correcao_ate_recebime
 valor_recuperavel_ate_recebimento = valor_corrigido_ate_recebimento × taxa_recuperacao
 remuneracao_variavel_valor = valor_recuperavel_ate_recebimento × remuneracao_variavel_perc
 remuneracao_variavel_valor_final = valor_recuperavel_ate_recebimento - remuneracao_variavel_valor
-fator_de_desconto_vp = (1 + taxa_desconto_total) ^ (meses_ate_recebimento / 12)
+dias_ate_recebimento = meses_ate_recebimento × 30
+data_ate_recebimento = data_base + dias_ate_recebimento
+fator_de_desconto_vp = (1 + taxa_desconto_total) ^ (dias_ate_recebimento / 360)
 valor_justo = remuneracao_variavel_valor_final / fator_de_desconto_vp
 ```
 
