@@ -10,7 +10,7 @@ from utils.analisador_bases import AnalisadorBases
 
 def show():
     """Página de Carregamento da Base"""
-    st.header("📂 CARREGAMENTO DA BASE")
+    st.header("📂 Carregamento da Base")
     
     # Verificar se os parâmetros estão inicializados
     if 'params' not in st.session_state:
@@ -25,9 +25,21 @@ def show():
     if 'processamento_confirmado' not in st.session_state:
         st.session_state.processamento_confirmado = False
     
+    # Estilos personalizados para o uploader
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stFileUploader"] label p {
+            font-size: 115% !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # Upload de múltiplos arquivos
     uploaded_files = st.file_uploader(
-        "📤 Selecione os arquivos Excel das distribuidoras",
+        "📤 Selecione os arquivos Excel das distribuidoras:",
         type=['xlsx', 'xls'],
         accept_multiple_files=True,
         help="Você pode carregar múltiplos arquivos Excel. Cada um será processado individualmente."
@@ -209,7 +221,7 @@ def show():
                             """)
                     
                     with col_data2:
-                        st.write("**🛠️ Ajustar Data Base**")
+                        st.write("**🛠️ Ajustar data base**")
                         
                         # Input para modificar a data base
                         nova_data = st.date_input(
@@ -228,7 +240,7 @@ def show():
                 # Não encontrou datas no cabeçalho nem em colunas
                 with st.expander(f"⚠️ Data Base: {nome_arquivo}", expanded=False):
                     st.warning("⚠️ **Nenhuma data foi detectada automaticamente.**")
-                    st.info("**💡 Dica:** Verifique se o arquivo possui:\n- Uma coluna com data no cabeçalho (ex: 2025-02-15)\n- Uma coluna de vencimento com datas válidas")
+                    st.info("**💡 Dica:** verifique se o arquivo possui:\n- Uma coluna com data no cabeçalho (ex: 2025-02-15)\n- Uma coluna de vencimento com datas válidas")
                     
                     st.write("**🛠️ Definir Data Base Manualmente**")
                     data_manual = st.date_input(
@@ -268,7 +280,7 @@ def show():
     st.markdown("---")
     st.subheader("ℹ️ Informações sobre Upload")
     
-    with st.expander("📖 Formatos Suportados", expanded=False):
+    with st.expander("📖 Formatos suportados", expanded=False):
         st.info("""
         **Formatos de arquivo aceitos:**
         - `.xlsx` - Excel moderno (recomendado)

@@ -481,7 +481,7 @@ class CalculadorValorJusto:
 
 def show():
     """Página de Correção Monetária e Valor Justo"""
-    st.header("💰 CORREÇÃO MONETÁRIA e VALOR JUSTO")
+    st.header("💰 Correção Monetária e Valor Justo")
     
     # Inicializar flags de controle
     if 'calculo_solicitado' not in st.session_state:
@@ -520,7 +520,7 @@ def show():
     if not tem_indices:
         st.warning("⚠️ **PASSO 0:** Faça o upload do arquivo de índices IGP-M/IPCA para continuar.")
         
-        with st.expander("📤 Upload dos Índices IGP-M/IPCA", expanded=True):
+        with st.expander("📥 Upload dos Índices IGP-M/IPCA", expanded=True):
             st.info("""
             **📋 Instruções:** 
             
@@ -554,7 +554,7 @@ def show():
             
             # Upload do arquivo
             uploaded_file_indices = st.file_uploader(
-                "📤 Selecione o arquivo de Índices IGP-M/IPCA (ambas as abas serão carregadas)",
+                "📥 Selecione o arquivo de Índices IGP-M/IPCA (ambas as abas serão carregadas)",
                 type=['xlsx', 'xls'],
                 help="Arquivo Excel com índices econômicos. Sistema carregará automaticamente abas IGPM e IGPM_IPCA",
                 key="upload_indices_modulo4"

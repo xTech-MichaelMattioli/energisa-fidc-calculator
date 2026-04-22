@@ -34,7 +34,7 @@ def obter_campos_obrigatorios_padrao():
 
 def show():
     """Página de Mapeamento de Campos"""
-    st.header("🗺️ MAPEAMENTO DE CAMPOS")
+    st.header("🗺️ Mapeamento de Campos")
     
     # Verificar se há arquivos carregados
     if 'df_carregado' not in st.session_state or not st.session_state.df_carregado:

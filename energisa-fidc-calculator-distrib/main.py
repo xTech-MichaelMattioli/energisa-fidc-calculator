@@ -26,13 +26,13 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        background: linear-gradient(90deg, #00A859 0%, #28C76F 100%);
+        background: linear-gradient(90deg, #10A4B2 0%, #5AC76F 50%, #A3E82B 100%);
         padding: 2rem;
-        border-radius: 10px;
+        border-radius: 8px;
         color: white;
         text-align: center;
         margin-bottom: 2rem;
-        box-shadow: 0 4px 8px rgba(0, 168, 89, 0.3);
+        box-shadow: 0 2px 4px rgba(0, 168, 89, 0.3);
     }
     
     .metric-container {
@@ -99,11 +99,11 @@ def main():
     monetariamente com aplicação de IPCA e taxas de recuperação.
     
     **Fluxo do processo:**
-    1.  **Carregamento** - Upload e análise dos arquivos Excel
+    1. 📥 **Carregamento** - Upload e análise dos arquivos Excel
     2. 🗺️ **Mapeamento** - Mapeamento automático e manual de campos
     3. 💰 **Correção** - Cálculo de aging, correção monetária e valor justo
     
-    **👈 Use a navegação na barra lateral para acessar cada etapa.**
+    **⬅️ Use a navegação na barra lateral para acessar cada etapa.**
     """)
     
     # Quick stats se houver dados finais
