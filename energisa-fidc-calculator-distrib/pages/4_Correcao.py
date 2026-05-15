@@ -12,6 +12,7 @@ import time
 from utils.calculador_aging import CalculadorAging
 from utils.calculador_correcao import CalculadorCorrecao
 from utils.calculador_valor_justo_distribuidoras import CalculadorValorJustoDistribuidoras, CalculadorValorJusto
+from utils.gerenciador_arquivos import gerar_caminho_parquet_correcao
 from utils.visualizador_voltz import VisualizadorVoltz
 from utils.visualizador_distribuidoras import VisualizadorDistribuidoras
 from utils.auto_export_resultado import exportar_resultado_final_excel
@@ -479,6 +480,65 @@ class CalculadorValorJusto:
             'descricao_prazo': 'prazo_recebimento em meses'
         }
 
+def salvar_dataframe_resultado_em_parquet(
+    df: pd.DataFrame,
+    nome_base: str,
+    limite_preview: int = 200
+) -> dict:
+    """
+    Salva um DataFrame grande em Parquet e retorna
+    apenas metadados leves para o session_state.
+    """
+
+    if df is None or df.empty:
+        return {
+            "caminho_parquet": None,
+            "registros": 0,
+            "colunas": 0,
+            "nomes_colunas": [],
+            "preview": pd.DataFrame()
+        }
+
+    caminho_parquet = gerar_caminho_parquet_correcao(nome_base)
+
+    df.to_parquet(
+        caminho_parquet,
+        index=False,
+        engine="pyarrow",
+        compression="snappy"
+    )
+
+    return {
+        "caminho_parquet": caminho_parquet,
+        "registros": len(df),
+        "colunas": len(df.columns),
+        "nomes_colunas": df.columns.tolist(),
+        "preview": df.head(limite_preview).copy()
+    }
+
+
+def limpar_resultados_correcao_session_state():
+    """
+    Remove resultados antigos da correção do session_state,
+    tanto no modelo antigo quanto no modelo novo.
+    """
+
+    chaves_para_limpar = [
+        # Modelo antigo
+        "df_final",
+        "df_com_aging",
+        "df_final_voltz_tipado",
+
+        # Modelo novo
+        "df_final_info",
+        "df_com_aging_info",
+        "df_final_voltz_tipado_info"
+    ]
+
+    for chave in chaves_para_limpar:
+        if chave in st.session_state:
+            del st.session_state[chave]
+
 def show():
     """Página de Correção Monetária e Valor Justo"""
     st.header("💰 Correção Monetária e Valor Justo")
@@ -493,18 +553,42 @@ def show():
     if 'indices_carregados' not in st.session_state:
         st.session_state.indices_carregados = False
     
-    # Verificar se temos dados padronizados
-    if 'df_padronizado' not in st.session_state or st.session_state.df_padronizado.empty:
-        st.warning("⚠️ Realize o mapeamento de campos antes de calcular a correção monetária.")
-        st.info("💡 Vá para a página de **Mapeamento** e complete o processo de mapeamento primeiro.")
+    # ============================================================
+    # Verificar se temos dados padronizados convertidos em Parquet
+    # ============================================================
+
+    if (
+        "df_padronizado_info" not in st.session_state
+        or not st.session_state.df_padronizado_info
+    ):
+        st.warning(
+            "⚠️ Realize o mapeamento de campos antes de calcular a correção monetária."
+        )
+        st.info(
+            "💡 Vá para a página de **Mapeamento** e complete o processo de mapeamento primeiro."
+        )
         return
-    
+
+    df_padronizado_info = st.session_state.df_padronizado_info
+
+    caminho_parquet_padronizado = df_padronizado_info.get("caminho_parquet")
+
+    if not caminho_parquet_padronizado or not os.path.exists(caminho_parquet_padronizado):
+        st.error(
+            "❌ O arquivo Parquet da base padronizada não foi encontrado. "
+            "Refaça a etapa de mapeamento."
+        )
+        return
+
+    # Metadados leves da base padronizada
+    total_registros_padronizados = df_padronizado_info.get("registros", 0)
+    colunas_padronizadas = df_padronizado_info.get("nomes_colunas", [])
+
     # Verificar se os parâmetros estão inicializados
-    if 'params' not in st.session_state:
+    if "params" not in st.session_state:
         from utils.parametros_correcao import ParametrosCorrecao
         st.session_state.params = ParametrosCorrecao()
-    
-    df_padronizado = st.session_state.df_padronizado
+
     calc_aging = CalculadorAging(st.session_state.params)
     calc_correcao = CalculadorCorrecao(st.session_state.params)
     
@@ -682,13 +766,16 @@ def show():
             st.session_state.taxa_recuperacao_carregada = False
             st.session_state.cdi_carregado = False
             st.session_state.calculo_solicitado = False
-            # Limpar ambos os DataFrames
+
+            limpar_resultados_correcao_session_state()
+
             if 'df_indices_economicos' in st.session_state:
                 del st.session_state.df_indices_economicos
             if 'df_indices_igpm' in st.session_state:
                 del st.session_state.df_indices_igpm
             if 'calculador_valor_justo' in st.session_state:
                 del st.session_state.calculador_valor_justo
+
             st.rerun()
 
         # Mostrar preview das abas carregadas
@@ -789,11 +876,8 @@ def show():
                             # Resetar flags subsequentes
                             st.session_state.cdi_carregado = False
                             st.session_state.calculo_solicitado = False
-                            if 'df_final' in st.session_state:
-                                del st.session_state.df_final
-                            if 'df_com_aging' in st.session_state:
-                                del st.session_state.df_com_aging
-                            
+                            limpar_resultados_correcao_session_state()
+    
                             st.rerun()
                         else:
                             st.error("❌ Nenhum dado válido encontrado no arquivo. Verifique a estrutura do arquivo.")
@@ -814,8 +898,12 @@ def show():
             st.session_state.taxa_recuperacao_carregada = False
             st.session_state.cdi_carregado = False
             st.session_state.calculo_solicitado = False
+
+            limpar_resultados_correcao_session_state()
+
             if 'df_taxa_recuperacao' in st.session_state:
                 del st.session_state.df_taxa_recuperacao
+
             st.rerun()
 
         # Mostrar o head dos dados num expander
@@ -884,10 +972,7 @@ def show():
                             
                             # Resetar flag de cálculo
                             st.session_state.calculo_solicitado = False
-                            if 'df_final' in st.session_state:
-                                del st.session_state.df_final
-                            if 'df_com_aging' in st.session_state:
-                                del st.session_state.df_com_aging
+                            limpar_resultados_correcao_session_state()
 
                             # Otimizar curva DI-PRE (vetorizado, sem loop por mes)
                             st.session_state.df_di_pre = otimizar_curva_di_pre(st.session_state.df_di_pre)
@@ -909,9 +994,13 @@ def show():
         if st.button("🔄 Recarregar Dados CDI", key="recarregar_dados_cdi"):
             st.session_state.cdi_carregado = False
             st.session_state.calculo_solicitado = False
+
+            limpar_resultados_correcao_session_state()
+
             if 'df_di_pre' in st.session_state:
                 del st.session_state.df_di_pre
-                st.rerun()  # Recarregar a página para atualizar o estado
+
+            st.rerun()
 
             # Mostrar o head dos dados num expander
             if 'df_di_pre' in st.session_state:
@@ -962,10 +1051,36 @@ def show():
     col1, col2 = st.columns(2)
 
     with col1:
-        st.metric("📊 Registros a Processar", f"{len(df_padronizado):,}")
-    
+        st.metric(
+            "📊 Registros a Processar",
+            f"{total_registros_padronizados:,}"
+        )
+
     with col2:
-        empresas_dados = df_padronizado['empresa'].nunique() if 'empresa' in df_padronizado.columns else 0
+        empresas_dados = 0
+
+        # Ler somente a coluna 'empresa' do Parquet para calcular a métrica,
+        # evitando carregar a base inteira antes do processamento.
+        if "empresa" in colunas_padronizadas:
+            try:
+                df_empresas = pd.read_parquet(
+                    caminho_parquet_padronizado,
+                    columns=["empresa"]
+                )
+
+                empresas_dados = (
+                    df_empresas["empresa"].nunique()
+                    if "empresa" in df_empresas.columns
+                    else 0
+                )
+
+                del df_empresas
+
+            except Exception as e:
+                st.warning(
+                    f"⚠️ Não foi possível calcular a quantidade de empresas: {str(e)}"
+                )
+
         st.metric("🏢 Empresas nos Dados", empresas_dados)
 
     
@@ -1053,9 +1168,26 @@ def show():
                     )
                     st.dataframe(df_preview, use_container_width=True, height=320)
             
-            # Garantir que a data_base selecionada sobrescreva a coluna de entrada antes de qualquer cálculo
-            df_entrada_calculo = df_padronizado.copy()
-            df_entrada_calculo['data_base'] = data_base_execucao
+            # ============================================================
+            # Carregar a base padronizada somente no momento do cálculo
+            # ============================================================
+
+            with log_container:
+                st.info(
+                    "📥 Carregando a base padronizada a partir do arquivo Parquet..."
+                )
+
+            df_entrada_calculo = pd.read_parquet(caminho_parquet_padronizado)
+
+            if df_entrada_calculo.empty:
+                st.error(
+                    "❌ A base padronizada está vazia. "
+                    "Refaça a etapa de mapeamento antes de calcular."
+                )
+                return
+
+            # Garantir que a data_base selecionada sobrescreva a coluna de entrada
+            df_entrada_calculo["data_base"] = data_base_execucao
 
             # Iniciar cronômetro
             import time
@@ -1071,6 +1203,7 @@ def show():
                 
             etapa_inicio = time.time()
             df_com_aging = calc_aging.processar_aging_completo(df_entrada_calculo.copy())
+            del df_entrada_calculo
             etapa_tempo = time.time() - etapa_inicio
             
             if df_com_aging.empty:
@@ -1393,11 +1526,24 @@ def show():
                 )
                 
                 # Finalizar processamento para VOLTZ
-                st.session_state.df_final = df_final_temp
-                st.session_state.df_com_aging = df_com_aging
+                # ============================================================
+                # Salvar resultados VOLTZ em Parquet
+                # ============================================================
 
+                st.session_state.df_final_info = salvar_dataframe_resultado_em_parquet(
+                    df_final_temp,
+                    "df_final_voltz"
+                )
+
+                st.session_state.df_com_aging_info = salvar_dataframe_resultado_em_parquet(
+                    df_com_aging,
+                    "df_com_aging_voltz",
+                    limite_preview=50
+                )
+
+                # Exportação automática continua usando o DataFrame já em memória
                 caminho_exportado, novo_arquivo = exportar_resultado_final_excel(
-                    st.session_state.df_final,
+                    df_final_temp,
                     eh_voltz=True,
                 )
                 if caminho_exportado:
@@ -1430,274 +1576,21 @@ def show():
                     st.info(f"⚡ **VOLTZ Performance:** {len(df_final_temp):,} registros em {tempo_total:.2f}s")
                     st.info(f"🚀 **Throughput VOLTZ:** {velocidade_total:,.0f} registros/segundo")
                 
-
-                # ========== TRATAMENTO AUTOMÁTICO DE TIPAGENS VOLTZ ==========
-                def tratar_tipagem_dataframe_voltz(df):
-                    """
-                    Método que identifica e trata automaticamente todas as colunas e suas tipagens
-                    especificamente otimizado para dados VOLTZ
-                    """
-                    if df.empty:
-                        return df
-                    
-                    df_tratado = df.copy()
-                    log_tipagem = []
-                    
-                    with st.expander("🔍 **Tratamento Automático de Tipagens - VOLTZ**", expanded=False):
-                        st.info("🤖 Analisando e otimizando tipos de dados automaticamente...")
-                        
-                        # Contadores para estatísticas
-                        colunas_numericas = 0
-                        colunas_datas = 0
-                        colunas_texto = 0
-                        colunas_otimizadas = 0
-                        
-                        progress_tipagem = st.progress(0)
-                        
-                        for i, col in enumerate(df_tratado.columns):
-                            try:
-                                # Atualizar progress bar
-                                progress_tipagem.progress((i + 1) / len(df_tratado.columns))
-                                
-                                # Amostrar dados para análise (para performance)
-                                amostra = df_tratado[col].dropna().head(1000)
-                                tipo_original = str(df_tratado[col].dtype)
-                                
-                                if amostra.empty:
-                                    log_tipagem.append(f"⚠️ {col}: Coluna vazia - mantida como {tipo_original}")
-                                    continue
-                                
-                                # 1. DETECTAR E TRATAR COLUNAS DE DATA
-                                if any(keyword in col.lower() for keyword in ['data', 'date', 'vencimento', 'emissao', 'base']):
-                                    try:
-                                        # Tentar múltiplos formatos de data
-                                        df_tratado[col] = pd.to_datetime(df_tratado[col], 
-                                                                       errors='coerce', 
-                                                                       dayfirst=True,
-                                                                       format='mixed')
-                                        if not df_tratado[col].isna().all():
-                                            colunas_datas += 1
-                                            colunas_otimizadas += 1
-                                            log_tipagem.append(f"📅 {col}: {tipo_original} → datetime64")
-                                            continue
-                                    except:
-                                        pass
-                                
-                                # 2. DETECTAR E TRATAR COLUNAS NUMÉRICAS
-                                # Verificar se é numerico (incluindo valores com vírgula brasileira)
-                                if df_tratado[col].dtype == 'object':
-                                    # Tentar conversão de números com vírgula brasileira
-                                    amostra_str = amostra.astype(str).str.replace(',', '.', regex=False)
-                                    
-                                    # Verificar se parece com número
-                                    pattern_numerico = r'^-?\d+(\.\d+)?$'
-                                    eh_numerico = amostra_str.str.match(pattern_numerico, na=False).sum() > (len(amostra) * 0.8)
-                                    
-                                    if eh_numerico:
-                                        try:
-                                            # Substituir vírgulas por pontos e converter
-                                            df_tratado[col] = df_tratado[col].astype(str).str.replace(',', '.', regex=False)
-                                            df_tratado[col] = pd.to_numeric(df_tratado[col], errors='coerce')
-                                            
-                                            # Otimizar tipo numérico
-                                            if df_tratado[col].isna().sum() < len(df_tratado) * 0.1:  # Menos de 10% NaN
-                                                # Verificar se são todos inteiros
-                                                if df_tratado[col].dropna().apply(lambda x: x.is_integer()).all():
-                                                    # Otimizar tipo inteiro
-                                                    min_val = df_tratado[col].min()
-                                                    max_val = df_tratado[col].max()
-                                                    
-                                                    if min_val >= 0:
-                                                        if max_val <= 255:
-                                                            df_tratado[col] = df_tratado[col].astype('uint8')
-                                                        elif max_val <= 65535:
-                                                            df_tratado[col] = df_tratado[col].astype('uint16')
-                                                        elif max_val <= 4294967295:
-                                                            df_tratado[col] = df_tratado[col].astype('uint32')
-                                                        else:
-                                                            df_tratado[col] = df_tratado[col].astype('uint64')
-                                                    else:
-                                                        if min_val >= -128 and max_val <= 127:
-                                                            df_tratado[col] = df_tratado[col].astype('int8')
-                                                        elif min_val >= -32768 and max_val <= 32767:
-                                                            df_tratado[col] = df_tratado[col].astype('int16')
-                                                        elif min_val >= -2147483648 and max_val <= 2147483647:
-                                                            df_tratado[col] = df_tratado[col].astype('int32')
-                                                        else:
-                                                            df_tratado[col] = df_tratado[col].astype('int64')
-                                                else:
-                                                    # Usar float32 se possível, senão float64
-                                                    df_tratado[col] = df_tratado[col].astype('float32')
-                                            
-                                            colunas_numericas += 1
-                                            colunas_otimizadas += 1
-                                            tipo_novo = str(df_tratado[col].dtype)
-                                            log_tipagem.append(f"🔢 {col}: {tipo_original} → {tipo_novo}")
-                                            continue
-                                        except:
-                                            pass
-                                
-                                # 3. OTIMIZAR COLUNAS DE TEXTO
-                                if df_tratado[col].dtype == 'object':
-                                    # Verificar se pode ser categoria
-                                    unique_ratio = df_tratado[col].nunique() / len(df_tratado)
-                                    
-                                    if unique_ratio < 0.1 and df_tratado[col].nunique() < 1000:  # Baixa cardinalidade
-                                        df_tratado[col] = df_tratado[col].astype('category')
-                                        colunas_otimizadas += 1
-                                        log_tipagem.append(f"📂 {col}: object → category (cardinalidade: {df_tratado[col].nunique()})")
-                                    else:
-                                        # Tentar string mais eficiente
-                                        try:
-                                            df_tratado[col] = df_tratado[col].astype('string')
-                                            log_tipagem.append(f"📝 {col}: object → string")
-                                        except:
-                                            log_tipagem.append(f"📝 {col}: mantido como object")
-                                    
-                                    colunas_texto += 1
-                                
-                                # 4. OTIMIZAR COLUNAS BOOLEAN
-                                if df_tratado[col].dtype == 'bool' or amostra.isin([True, False, 0, 1, 'True', 'False', 'true', 'false']).all():
-                                    try:
-                                        df_tratado[col] = df_tratado[col].astype('bool')
-                                        colunas_otimizadas += 1
-                                        log_tipagem.append(f"✅ {col}: → bool")
-                                    except:
-                                        pass
-                                
-                            except Exception as e:
-                                log_tipagem.append(f"❌ {col}: Erro na tipagem - {str(e)[:50]}...")
-                                continue
-                        
-                        # Estatísticas finais
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        with col1:
-                            st.metric("🔢 Numéricas", colunas_numericas, "otimizadas")
-                        with col2:
-                            st.metric("📅 Datas", colunas_datas, "convertidas")
-                        with col3:
-                            st.metric("📝 Texto", colunas_texto, "categorizadas")
-                        with col4:
-                            st.metric("⚡ Otimizadas", colunas_otimizadas, f"de {len(df_tratado.columns)}")
-                        
-                        # Comparar tamanhos
-                        memoria_original = df.memory_usage(deep=True).sum() / 1024 / 1024  # MB
-                        memoria_otimizada = df_tratado.memory_usage(deep=True).sum() / 1024 / 1024  # MB
-                        reducao_percentual = ((memoria_original - memoria_otimizada) / memoria_original) * 100
-                        
-                        st.success(f"✅ **Otimização completa!** Redução de memória: {reducao_percentual:.1f}% ({memoria_original:.1f}MB → {memoria_otimizada:.1f}MB)")
-                    
-                    return df_tratado
-                
                 # Aplicar tratamento de tipagem no dataframe VOLTZ
                 st.info("🔧 **Aplicando tratamento automático de tipagens...**")
                 df_final_temp_tipado = tratar_tipagem_dataframe_voltz(df_final_temp)
                 
                 # Atualizar no session_state
-                st.session_state.df_final_voltz_tipado = df_final_temp_tipado
-                
-                # ========== BOTÃO PARA SALVAR DADOS TRATADOS ==========
-                def salvar_dados_tratados_voltz(df_tipado):
-                    """
-                    Método que cria botão para salvar os dados tratados na pasta 'data'
-                    """
-                    # Garantir que a pasta 'data' existe
-                    data_path = os.path.join(os.getcwd(), 'data')
-                    if not os.path.exists(data_path):
-                        os.makedirs(data_path)
-                        st.info(f"📁 Pasta 'data' criada em: {data_path}")
-                    
-                    # Interface para salvar
-                    st.subheader("💾 **Exportar Dados VOLTZ Tratados**")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Opções de formato
-                        formato_export = st.selectbox(
-                            "Formato de exportação:",
-                            ["Excel (.xlsx)", "CSV (.csv)", "Pickle (.pkl)"],
-                            help="Escolha o formato para salvar os dados tratados"
-                        )
-                        
-                        # Nome do arquivo
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        nome_arquivo_default = f"VOLTZ_Dados_Tratados_{timestamp}"
-                        
-                        nome_arquivo = st.text_input(
-                            "Nome do arquivo:",
-                            value=nome_arquivo_default,
-                            help="Nome do arquivo (sem extensão)"
-                        )
-                    
-                    with col2:
-                        # Informações sobre o arquivo
-                        st.info(f"📊 **Registros:** {len(df_tipado):,}")
-                        st.info(f"📋 **Colunas:** {len(df_tipado.columns)}")
-                        memoria_mb = df_tipado.memory_usage(deep=True).sum() / 1024 / 1024
-                        st.info(f"💾 **Memória:** {memoria_mb:.1f} MB")
-                    
-                    # Botão de exportação
-                    if st.button("🚀 **Salvar Dados Tratados**", type="primary"):
-                        try:
-                            # Determinar extensão e caminho
-                            if formato_export == "Excel (.xlsx)":
-                                extensao = ".xlsx"
-                                caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
-                                
-                                with st.spinner("📤 Salvando arquivo Excel..."):
-                                    df_tipado.to_excel(caminho_arquivo, index=False)
-                                    
-                            elif formato_export == "CSV (.csv)":
-                                extensao = ".csv"
-                                caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
-                                
-                                with st.spinner("📤 Salvando arquivo CSV..."):
-                                    salvar_csv_brasil(df_tipado, caminho_arquivo, casas_decimais=4)
-                                    
-                            elif formato_export == "Pickle (.pkl)":
-                                extensao = ".pkl"
-                                caminho_arquivo = os.path.join(data_path, f"{nome_arquivo}{extensao}")
-                                
-                                with st.spinner("📤 Salvando arquivo Pickle..."):
-                                    df_tipado.to_pickle(caminho_arquivo)
-                            
-                            # Verificar se arquivo foi criado
-                            if os.path.exists(caminho_arquivo):
-                                tamanho_arquivo = os.path.getsize(caminho_arquivo) / 1024 / 1024  # MB
-                                
-                                st.success(f"✅ **Arquivo salvo com sucesso!**")
-                                st.info(f"📁 **Localização:** `{caminho_arquivo}`")
-                                st.info(f"📊 **Tamanho:** {tamanho_arquivo:.1f} MB")
-                                st.info(f"⏰ **Timestamp:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-                                
-                                # Balões de comemoração
-                                st.balloons()
-                                
-                                # Log no session_state para histórico
-                                if 'historico_exports_voltz' not in st.session_state:
-                                    st.session_state.historico_exports_voltz = []
-                                
-                                st.session_state.historico_exports_voltz.append({
-                                    'timestamp': datetime.now(),
-                                    'arquivo': caminho_arquivo,
-                                    'formato': formato_export,
-                                    'registros': len(df_tipado),
-                                    'tamanho_mb': tamanho_arquivo
-                                })
-                                
-                            else:
-                                st.error("❌ Erro: Arquivo não foi criado corretamente")
-                                
-                        except Exception as e:
-                            st.error(f"❌ **Erro ao salvar arquivo:** {str(e)}")
-                            st.exception(e)
-
+                # O DataFrame tipado será usado diretamente abaixo para exportação,
+                # sem permanecer armazenado no session_state.
                 
                 # Chamar função de salvamento
                 salvar_dados_tratados_voltz(df_final_temp_tipado)
 
+                del df_com_aging
+                del df_final_temp
+                del df_final_temp_tipado
+                
                 # Para VOLTZ, terminar aqui
                 return
             else:
@@ -2038,20 +1931,36 @@ def show():
                     )
 
                     # ============= ETAPA 8: ADICIONAR COLUNAS INFORMATIVAS =============
-                    
-                    # Salvar resultado no session_state
-                    st.session_state.df_final = df_final_temp
-                    st.session_state.df_com_aging = df_com_aging
+                    # ============================================================
+                    # ETAPA 8: Salvar resultados finais em Parquet
+                    # ============================================================
 
+                    st.session_state.df_final_info = salvar_dataframe_resultado_em_parquet(
+                        df_final_temp,
+                        "df_final_distribuidoras"
+                    )
+
+                    st.session_state.df_com_aging_info = salvar_dataframe_resultado_em_parquet(
+                        df_com_aging,
+                        "df_com_aging_distribuidoras",
+                        limite_preview=50
+                    )
+
+                    # Exportação automática usando o DataFrame ainda em memória
                     caminho_exportado, novo_arquivo = exportar_resultado_final_excel(
-                        st.session_state.df_final,
+                        df_final_temp,
                         eh_voltz=False,
                     )
+
                     if caminho_exportado:
                         if novo_arquivo:
-                            st.success(f"💾 Resultado final exportado automaticamente em: {caminho_exportado}")
+                            st.success(
+                                f"💾 Resultado final exportado automaticamente em: {caminho_exportado}"
+                            )
                         else:
-                            st.info(f"💾 Última exportação automática: {caminho_exportado}")
+                            st.info(
+                                f"💾 Última exportação automática: {caminho_exportado}"
+                            )
                     
                     # Calcular estatísticas do DI-PRE para exibição
                     calc_valor_justo = CalculadorValorJusto()
@@ -2101,19 +2010,38 @@ def show():
                     st.warning("⚠️ Continuando com dados básicos (sem valor justo)")
                     # Salvar dados básicos mesmo com erro no valor justo
                     if df_final_temp is None:
-                        df_final_temp = df_com_aging.copy() if df_com_aging is not None else pd.DataFrame()
-                    st.session_state.df_final = df_final_temp
-                    st.session_state.df_com_aging = df_com_aging
+                        df_final_temp = (
+                            df_com_aging.copy()
+                            if df_com_aging is not None
+                            else pd.DataFrame()
+                        )
+
+                    # Salvar resultados básicos em Parquet mesmo quando o valor justo falha
+                    st.session_state.df_final_info = salvar_dataframe_resultado_em_parquet(
+                        df_final_temp,
+                        "df_final_basico_sem_valor_justo"
+                    )
+
+                    st.session_state.df_com_aging_info = salvar_dataframe_resultado_em_parquet(
+                        df_com_aging,
+                        "df_com_aging_sem_valor_justo",
+                        limite_preview=50
+                    )
 
                     caminho_exportado, novo_arquivo = exportar_resultado_final_excel(
-                        st.session_state.df_final,
+                        df_final_temp,
                         eh_voltz=False,
                     )
+
                     if caminho_exportado:
                         if novo_arquivo:
-                            st.success(f"💾 Dados básicos exportados automaticamente em: {caminho_exportado}")
+                            st.success(
+                                f"💾 Dados básicos exportados automaticamente em: {caminho_exportado}"
+                            )
                         else:
-                            st.info(f"💾 Última exportação automática: {caminho_exportado}")
+                            st.info(
+                                f"💾 Última exportação automática: {caminho_exportado}"
+                            )
 
                     st.exception(e)  # Debug detalhado
                     
@@ -2121,45 +2049,182 @@ def show():
             st.error(f"❌ Erro ao processar correção: {str(e)}")
             st.exception(e)  # Debug
 
-        if 'df_final' in st.session_state and st.session_state.df_final is not None and not st.session_state.df_final.empty:
-            df_resumo = st.session_state.df_final
+        if (
+            "df_final_info" in st.session_state
+            and st.session_state.df_final_info.get("registros", 0) > 0
+        ):
+            info_resultado_final = st.session_state.df_final_info
+            caminho_df_final = info_resultado_final.get("caminho_parquet")
+            colunas_df_final = info_resultado_final.get("nomes_colunas", [])
 
-            coluna_principal = 'valor_principal_limpo' if 'valor_principal_limpo' in df_resumo.columns else 'valor_principal'
-            total_valor_principal = df_resumo[coluna_principal].sum() if coluna_principal in df_resumo.columns else 0
+            if caminho_df_final and os.path.exists(caminho_df_final):
 
-            if 'correcao_monetaria' in df_resumo.columns:
-                total_correcao_monetaria = df_resumo['correcao_monetaria'].sum()
+                # ============================================================
+                # Ler apenas as colunas necessárias para montar os totais
+                # ============================================================
+
+                colunas_resumo_candidatas = [
+                    "valor_principal_limpo",
+                    "valor_principal",
+                    "correcao_monetaria",
+                    "valor_corrigido",
+                    "valor_liquido",
+                    "valor_justo_reajustado",
+                    "valor_justo",
+                ]
+
+                colunas_resumo = [
+                    coluna
+                    for coluna in colunas_resumo_candidatas
+                    if coluna in colunas_df_final
+                ]
+
+                if colunas_resumo:
+                    df_resumo = pd.read_parquet(
+                        caminho_df_final,
+                        columns=colunas_resumo
+                    )
+                else:
+                    df_resumo = pd.DataFrame()
+
+                # ============================================================
+                # Valor principal
+                # ============================================================
+
+                if "valor_principal_limpo" in df_resumo.columns:
+                    coluna_principal = "valor_principal_limpo"
+                else:
+                    coluna_principal = "valor_principal"
+
+                total_valor_principal = (
+                    df_resumo[coluna_principal].sum()
+                    if coluna_principal in df_resumo.columns
+                    else 0
+                )
+
+                # ============================================================
+                # Correção monetária
+                # ============================================================
+
+                if "correcao_monetaria" in df_resumo.columns:
+                    total_correcao_monetaria = df_resumo["correcao_monetaria"].sum()
+                else:
+                    total_valor_corrigido = (
+                        df_resumo["valor_corrigido"].sum()
+                        if "valor_corrigido" in df_resumo.columns
+                        else 0
+                    )
+
+                    total_valor_liquido = (
+                        df_resumo["valor_liquido"].sum()
+                        if "valor_liquido" in df_resumo.columns
+                        else 0
+                    )
+
+                    total_correcao_monetaria = max(
+                        total_valor_corrigido - total_valor_liquido,
+                        0
+                    )
+
+                # ============================================================
+                # Valor justo
+                # ============================================================
+
+                if "valor_justo_reajustado" in df_resumo.columns:
+                    coluna_valor_justo = "valor_justo_reajustado"
+                else:
+                    coluna_valor_justo = "valor_justo"
+
+                total_valor_justo = (
+                    df_resumo[coluna_valor_justo].sum()
+                    if coluna_valor_justo in df_resumo.columns
+                    else 0
+                )
+
+                del df_resumo
+
+                # ============================================================
+                # Exibir métricas finais
+                # ============================================================
+
+                st.markdown("### 📊 Comparativo Final de Valores")
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "📊 Valor Principal",
+                        f"R$ {total_valor_principal:,.2f}"
+                        .replace(",", "X")
+                        .replace(".", ",")
+                        .replace("X", ".")
+                    )
+
+                with col2:
+                    st.metric(
+                        "⚡ Correção Monetária",
+                        f"R$ {total_correcao_monetaria:,.2f}"
+                        .replace(",", "X")
+                        .replace(".", ",")
+                        .replace("X", ".")
+                    )
+
+                with col3:
+                    st.metric(
+                        "💎 Valor Justo",
+                        f"R$ {total_valor_justo:,.2f}"
+                        .replace(",", "X")
+                        .replace(".", ",")
+                        .replace("X", ".")
+                    )
+
+                if coluna_valor_justo == "valor_justo_reajustado":
+                    st.caption(
+                        "Valor Justo exibido com base em "
+                        "valor_justo_reajustado (pós-RV)."
+                    )
+
+                # ============================================================
+                # Preview final leve
+                # ============================================================
+
+                st.write("**📋 Pré-visualização do resultado final**")
+
+                preview_final = info_resultado_final.get("preview")
+
+                if preview_final is not None and not preview_final.empty:
+                    st.dataframe(
+                        preview_final,
+                        use_container_width=True,
+                        height=420
+                    )
+
+                    registros_totais_preview = info_resultado_final.get("registros", 0)
+
+                    if registros_totais_preview > len(preview_final):
+                        st.caption(
+                            f"Mostrando {len(preview_final):,} de "
+                            f"{registros_totais_preview:,} registros "
+                            "para evitar MessageSizeError."
+                        )
+
+                else:
+                    st.info("ℹ️ Nenhuma pré-visualização disponível.")
+
             else:
-                total_valor_corrigido = df_resumo['valor_corrigido'].sum() if 'valor_corrigido' in df_resumo.columns else 0
-                total_valor_liquido = df_resumo['valor_liquido'].sum() if 'valor_liquido' in df_resumo.columns else 0
-                total_correcao_monetaria = max(total_valor_corrigido - total_valor_liquido, 0)
-
-            coluna_valor_justo = 'valor_justo_reajustado' if 'valor_justo_reajustado' in df_resumo.columns else 'valor_justo'
-            total_valor_justo = df_resumo[coluna_valor_justo].sum() if coluna_valor_justo in df_resumo.columns else 0
-
-            st.markdown("### 📊 Comparativo Final de Valores")
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                st.metric("📊 Valor Principal", f"R$ {total_valor_principal:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-            with col2:
-                st.metric("⚡ Correção Monetária", f"R$ {total_correcao_monetaria:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-            with col3:
-                st.metric("💎 Valor Justo", f"R$ {total_valor_justo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-            if coluna_valor_justo == 'valor_justo_reajustado':
-                st.caption("Valor Justo exibido com base em valor_justo_reajustado (pós-RV).")
-
-            st.write("**📋 Pré-visualização do resultado final**")
-            st.dataframe(st.session_state.df_final.head(200), use_container_width=True, height=420)
-            if len(st.session_state.df_final) > 200:
-                st.caption(f"Mostrando 200 de {len(st.session_state.df_final):,} registros para evitar MessageSizeError.")
+                st.warning(
+                    "⚠️ O arquivo Parquet do resultado final não foi encontrado."
+                )
 
     # Mostrar resultados APENAS se o cálculo foi solicitado pelo usuário E temos dados calculados
-    calculo_foi_solicitado = st.session_state.get('calculo_solicitado', False)
-    tem_dados_calculados = 'df_final' in st.session_state and not st.session_state.df_final.empty
+    calculo_foi_solicitado = st.session_state.get(
+        "calculo_solicitado",
+        False
+    )
+
+    tem_dados_calculados = (
+        "df_final_info" in st.session_state
+        and st.session_state.df_final_info.get("registros", 0) > 0
+    )
     
     # if calculo_foi_solicitado and tem_dados_calculados:
         
