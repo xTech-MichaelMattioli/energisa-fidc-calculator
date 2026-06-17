@@ -9,8 +9,6 @@ from typing import Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-from utils.exportacao_csv_brasil import truncar_numericos
-
 
 def _chave_resultado(df_final: pd.DataFrame) -> str:
     """Gera uma chave simples para evitar exportacoes duplicadas em reruns."""
@@ -18,7 +16,7 @@ def _chave_resultado(df_final: pd.DataFrame) -> str:
     total_colunas = str(len(df_final.columns))
 
     agregados = []
-    for coluna in ("valor_principal", "valor_corrigido", "valor_justo"):
+    for coluna in ("valor_principal", "valor_corrigido", "valor_justo", "valor_justo_reajustado"):
         if coluna in df_final.columns:
             serie = pd.to_numeric(df_final[coluna], errors="coerce")
             agregados.append(f"{serie.sum(skipna=True):.2f}")
@@ -73,10 +71,30 @@ def exportar_resultado_final_excel(
     if "valor_corrigido" in df_export.columns and "valor_corrigido_ate_data_base" not in df_export.columns:
         df_export = df_export.rename(columns={"valor_corrigido": "valor_corrigido_ate_data_base"})
 
-    df_export = truncar_numericos(df_export, casas_decimais=4)
-
     with pd.ExcelWriter(caminho_arquivo, engine="openpyxl") as writer:
         df_export.to_excel(writer, index=False, sheet_name="resultado")
+        worksheet = writer.sheets["resultado"]
+
+        for indice_coluna, nome_coluna in enumerate(df_export.columns, start=1):
+            if not pd.api.types.is_numeric_dtype(df_export[nome_coluna]):
+                continue
+
+            nome_normalizado = str(nome_coluna).lower()
+            if any(termo in nome_normalizado for termo in ("valor", "multa", "juros", "remuneracao", "desconto")):
+                formato = '#,##0.00'
+            elif any(termo in nome_normalizado for termo in ("taxa", "fator", "indice", "ipca", "spread", "cdi")):
+                formato = '0.0000000000'
+            else:
+                formato = '0.##########'
+
+            for celula in worksheet.iter_cols(
+                min_col=indice_coluna,
+                max_col=indice_coluna,
+                min_row=2,
+                max_row=worksheet.max_row,
+            ):
+                for item in celula:
+                    item.number_format = formato
 
     st.session_state.auto_export_caminho = str(caminho_arquivo)
     st.session_state.auto_export_chave_resultado = chave_atual

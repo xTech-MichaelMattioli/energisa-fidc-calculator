@@ -211,16 +211,17 @@ class CalculadorCorrecao:
         
         # Limpar valores de dedução
         # Valor não cedido
-        if 'valor_nao_cedido' in df.columns:
-            df['valor_nao_cedido_limpo'] = self.limpar_e_converter_valor(df['valor_nao_cedido'].fillna(0))
-        
-        # Valor terceiro
-        if 'valor_terceiro' in df.columns:
-            df['valor_terceiro_limpo'] = self.limpar_e_converter_valor(df['valor_terceiro'].fillna(0))
-        
-        # Valor CIP
-        if 'valor_cip' in df.columns:
-            df['valor_cip_limpo'] = self.limpar_e_converter_valor(df['valor_cip'].fillna(0))
+        deducoes = {
+            'valor_nao_cedido': 'valor_nao_cedido_limpo',
+            'valor_terceiro': 'valor_terceiro_limpo',
+            'valor_cip': 'valor_cip_limpo',
+        }
+
+        for coluna_origem, coluna_limpa in deducoes.items():
+            if coluna_origem in df.columns:
+                df[coluna_limpa] = self.limpar_e_converter_valor(df[coluna_origem].fillna(0))
+            else:
+                df[coluna_limpa] = 0.0
         
         # Calcular valor líquido
         df['valor_liquido'] = (
@@ -231,6 +232,25 @@ class CalculadorCorrecao:
         )
         
         # Garantir que valor líquido não seja negativo
+        total_deducoes = (
+            df['valor_nao_cedido_limpo'].sum()
+            + df['valor_terceiro_limpo'].sum()
+            + df['valor_cip_limpo'].sum()
+        )
+        if total_deducoes > 0:
+            st.warning(
+                f"⚠️ Valor líquido reduzido por deduções mapeadas: "
+                f"R$ {total_deducoes:,.2f}. "
+                "Confira se valor_nao_cedido, valor_terceiro e valor_cip foram mapeados corretamente."
+            )
+
+        registros_liquido_negativo = int((df['valor_liquido'] < 0).sum())
+        if registros_liquido_negativo > 0:
+            st.warning(
+                f"⚠️ {registros_liquido_negativo:,} registro(s) ficaram com valor_liquido negativo "
+                "antes do piso em zero. Verifique deduções maiores que o valor_principal."
+            )
+
         df['valor_liquido'] = np.maximum(df['valor_liquido'], 0)
         
         return df
@@ -412,18 +432,18 @@ class CalculadorCorrecao:
             df = df.copy()
             
             # Remover registros onde empresa é None ou vazia
-            registros_antes = len(df)
-            df = df.dropna(subset=['empresa'])  # Remove linhas onde empresa é NaN/None
-            df = df[df['empresa'].str.strip() != '']  # Remove linhas onde empresa é string vazia
-            registros_depois = len(df)
-            
-            if registros_antes != registros_depois:
-                registros_removidos = registros_antes - registros_depois
-                st.warning(f"⚠️ Removidos {registros_removidos:,} registros sem empresa válida")
-            
-            if df.empty:
-                st.error("❌ Nenhum registro válido após remoção de empresas vazias")
-                return df
+            if 'empresa' not in df.columns:
+                df['empresa'] = 'DESCONHECIDA'
+
+            empresa_normalizada = df['empresa'].astype('string').fillna('').str.strip()
+            registros_sem_empresa = int((empresa_normalizada == '').sum())
+
+            if registros_sem_empresa > 0:
+                df.loc[empresa_normalizada == '', 'empresa'] = 'DESCONHECIDA'
+                st.warning(
+                    f"⚠️ {registros_sem_empresa:,} registro(s) sem empresa válida foram mantidos "
+                    "com empresa='DESCONHECIDA' e taxa de recuperação padrão."
+                )
             
             # Mapear aging detalhado para categorias de taxa
             df['aging_taxa'] = df['aging'].apply(self.mapear_aging_para_taxa)

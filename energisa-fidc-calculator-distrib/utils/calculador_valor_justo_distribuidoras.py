@@ -573,9 +573,26 @@ class CalculadorValorJustoDistribuidoras:
 
         # ===== PASSO 3: FATOR DE DESCONTO (base 360 dias) =====
         data_base_dt = pd.to_datetime(df_final_temp['data_base'], errors='coerce').fillna(pd.Timestamp(datetime.now()))
+        data_recebimento_dt = pd.to_datetime(
+            df_final_temp.get('data_recebimento_estimada'),
+            errors='coerce'
+        )
+        if data_recebimento_dt is None:
+            data_recebimento_dt = pd.Series(pd.NaT, index=df_final_temp.index)
         meses_rec = pd.to_numeric(df_final_temp['meses_ate_recebimento'], errors='coerce').fillna(0)
-        df_final_temp['dias_ate_recebimento'] = meses_rec * 30
-        df_final_temp['data_ate_recebimento'] = data_base_dt + pd.to_timedelta(df_final_temp['dias_ate_recebimento'], unit='D')
+
+        mask_data_recebimento_invalida = data_recebimento_dt.isna()
+        if mask_data_recebimento_invalida.any():
+            data_recebimento_dt = data_recebimento_dt.copy()
+            data_recebimento_dt.loc[mask_data_recebimento_invalida] = (
+                data_base_dt.loc[mask_data_recebimento_invalida]
+                + pd.to_timedelta(meses_rec.loc[mask_data_recebimento_invalida] * 30, unit='D')
+            )
+
+        df_final_temp['data_ate_recebimento'] = data_recebimento_dt
+        df_final_temp['dias_ate_recebimento'] = (
+            df_final_temp['data_ate_recebimento'] - data_base_dt
+        ).dt.days.clip(lower=0)
         df_final_temp['fator_de_desconto_vp'] = self._potencia_composta_estavel(
             df_final_temp.get('taxa_desconto_total', 0),
             df_final_temp['dias_ate_recebimento'] / 360,
