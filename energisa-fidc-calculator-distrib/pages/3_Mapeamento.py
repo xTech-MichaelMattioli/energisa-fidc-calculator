@@ -578,11 +578,11 @@ def show():
                             )
 
                         if len(colunas_padrao) >= 2:
-                            df_final_padronizado = (
-                                df_final_padronizado.drop_duplicates(
+                            duplicatas_potenciais = int(
+                                df_final_padronizado.duplicated(
                                     subset=colunas_padrao,
                                     keep="first"
-                                ).reset_index(drop=True)
+                                ).sum()
                             )
 
                             colunas_auxiliares = [
@@ -599,15 +599,11 @@ def show():
                                 )
                             )
 
-                            registros_depois = len(df_final_padronizado)
-                            duplicatas_removidas = (
-                                registros_antes - registros_depois
-                            )
-
-                            if duplicatas_removidas > 0:
+                            if duplicatas_potenciais > 0:
                                 st.warning(
                                     f"⚠️ **Padrão**: "
-                                    f"{duplicatas_removidas:,} duplicatas removidas"
+                                    f"{duplicatas_potenciais:,} duplicatas potenciais encontradas, "
+                                    "mas todos os registros foram mantidos"
                                 )
                             else:
                                 st.success(

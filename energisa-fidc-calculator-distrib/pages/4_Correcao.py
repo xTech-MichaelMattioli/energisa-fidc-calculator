@@ -541,7 +541,35 @@ def limpar_resultados_correcao_session_state():
 
 def show():
     """Página de Correção Monetária e Valor Justo"""
-    st.header("💰 Correção Monetária e Valor Justo")
+    st.markdown(
+        """
+        <style>
+            .correcao-page-header {
+                display: flex;
+                align-items: center;
+                gap: 0.85rem;
+                margin: 0.25rem 0 1.25rem 0;
+            }
+
+            .correcao-page-header__logo {
+                font-size: 3rem;
+                line-height: 1;
+            }
+
+            .correcao-page-header__title {
+                font-size: 2rem;
+                font-weight: 700;
+                line-height: 1.2;
+                margin: 0;
+            }
+        </style>
+        <div class="correcao-page-header">
+            <span class="correcao-page-header__logo">💰</span>
+            <h1 class="correcao-page-header__title">Correção Monetária e Valor Justo</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     
     # Inicializar flags de controle
     if 'calculo_solicitado' not in st.session_state:
@@ -1347,8 +1375,8 @@ def show():
                                                     else:
                                                         df_tratado[col] = df_tratado[col].astype('int64')
                                             else:
-                                                # Usar float32 se possível, senão float64
-                                                df_tratado[col] = df_tratado[col].astype('float32')
+                                                # Manter float64 para evitar divergências monetárias por precisão.
+                                                df_tratado[col] = df_tratado[col].astype('float64')
                                         
                                         colunas_numericas += 1
                                         colunas_otimizadas += 1
@@ -1661,7 +1689,8 @@ def show():
                     
                     # Calcular taxa mensal = indice_atual - indice_anterior (diferença simples)
                     df_indices['taxa_mensal'] = 1 - df_indices['indice_mes_anterior'] / df_indices['indice']
-                    df_indices['taxa_diaria'] = (df_indices['taxa_mensal'] + 1) ** (1/30) - 1
+                    df_indices['dias_no_mes'] = df_indices['data'].dt.days_in_month.clip(lower=1)
+                    df_indices['taxa_diaria'] = (df_indices['taxa_mensal'] + 1) ** (1 / df_indices['dias_no_mes']) - 1
 
                     # Preparar DataFrame principal
                     df_final_temp = df_final_temp.copy()

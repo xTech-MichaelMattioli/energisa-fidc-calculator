@@ -4,6 +4,8 @@ import re
 from bs4 import BeautifulSoup
 from datetime import datetime
 import numpy as np
+from io import BytesIO, StringIO
+import unicodedata
 
 class ProcessadorDIPre:
     """
@@ -122,6 +124,15 @@ class ProcessadorDIPre:
         """
         Extrai número do formato brasileiro (14,90)
         """
+        if texto is None or (isinstance(texto, float) and np.isnan(texto)):
+            return None
+
+        if isinstance(texto, (int, float, np.integer, np.floating)):
+            valor = float(texto)
+            if -1000 <= valor <= 1000:
+                return valor
+            return None
+
         if not texto or texto in ['', '-', 'N/A', 'n/a']:
             return None
             
@@ -186,6 +197,272 @@ class ProcessadorDIPre:
         except Exception as e:
             raise Exception(f"Erro na validação dos dados: {str(e)}")
     
+    def processar_arquivo_bmf(self, uploaded_file):
+        """
+        Processa arquivo Excel/HTML da BMF com dados de DI x pre.
+        Suporta tambem planilhas tabulares com colunas como:
+        Descricao, Dias Uteis, Dias Corridos e Preco/Taxa.
+        """
+        try:
+            nome_arquivo = uploaded_file.name if hasattr(uploaded_file, 'name') else str(uploaded_file)
+            self.data_arquivo = self._extrair_data_arquivo(nome_arquivo)
+
+            conteudo_bytes = self._ler_conteudo_arquivo(uploaded_file)
+
+            df_tabular = self._processar_planilha_tabular(conteudo_bytes)
+            if df_tabular is not None and not df_tabular.empty:
+                self.df_di_pre = self._validar_e_limpar_dados(df_tabular)
+                self.total_registros = len(self.df_di_pre)
+                return self.df_di_pre
+
+            conteudo = conteudo_bytes.decode('utf-8', errors='ignore')
+            soup = BeautifulSoup(conteudo, 'html.parser')
+            dados_extraidos = self._extrair_dados_tabela(soup)
+
+            if dados_extraidos:
+                self.df_di_pre = pd.DataFrame(dados_extraidos)
+                self.total_registros = len(self.df_di_pre)
+                self.df_di_pre = self._validar_e_limpar_dados(self.df_di_pre)
+                return self.df_di_pre
+
+            raise ValueError("Nenhum dado valido encontrado no arquivo")
+
+        except Exception as e:
+            raise Exception(f"Erro ao processar arquivo BMF: {str(e)}")
+
+    def _ler_conteudo_arquivo(self, uploaded_file):
+        """
+        Le o upload preservando bytes para permitir leitura de XLSX e fallback HTML.
+        """
+        if hasattr(uploaded_file, 'seek'):
+            uploaded_file.seek(0)
+
+        if hasattr(uploaded_file, 'read'):
+            conteudo = uploaded_file.read()
+        else:
+            with open(uploaded_file, 'rb') as arquivo:
+                conteudo = arquivo.read()
+
+        if hasattr(uploaded_file, 'seek'):
+            uploaded_file.seek(0)
+
+        if isinstance(conteudo, str):
+            return conteudo.encode('utf-8', errors='ignore')
+
+        return conteudo
+
+    def _processar_planilha_tabular(self, conteudo_bytes):
+        """
+        Processa arquivos tabulares ja estruturados.
+        """
+        dataframes = []
+
+        try:
+            planilhas = pd.read_excel(BytesIO(conteudo_bytes), sheet_name=None, dtype=object)
+            dataframes.extend(planilhas.values())
+        except Exception:
+            pass
+
+        if not dataframes:
+            try:
+                tabelas_html = pd.read_html(BytesIO(conteudo_bytes), decimal=',', thousands='.')
+                dataframes.extend(tabelas_html)
+            except Exception:
+                pass
+
+        if not dataframes:
+            for encoding in ('utf-8-sig', 'latin1'):
+                try:
+                    texto = conteudo_bytes.decode(encoding)
+                    for sep in (';', ',', '\t'):
+                        df_csv = pd.read_csv(StringIO(texto), sep=sep, dtype=object)
+                        if df_csv.shape[1] > 1:
+                            dataframes.append(df_csv)
+                            break
+                    if dataframes:
+                        break
+                except Exception:
+                    continue
+
+        for df in dataframes:
+            df_processado = self._normalizar_dataframe_tabular(df)
+            if df_processado is not None and not df_processado.empty:
+                return df_processado
+
+        return None
+
+    def _normalizar_dataframe_tabular(self, df):
+        """
+        Converte diferentes layouts tabulares para as colunas usadas internamente.
+        """
+        if df is None or df.empty:
+            return None
+
+        candidatos = [df.copy(), self._promover_linha_cabecalho(df)]
+
+        for candidato in candidatos:
+            if candidato is None or candidato.empty:
+                continue
+
+            candidato = candidato.dropna(how='all').copy()
+            candidato.columns = [str(col).strip() for col in candidato.columns]
+            colunas = {self._normalizar_nome_coluna(col): col for col in candidato.columns}
+
+            coluna_dias_corridos = self._buscar_coluna(
+                colunas,
+                {
+                    'dias corridos', 'dias corrido', 'dias calendario',
+                    'dias calendario corridos', 'dc'
+                }
+            )
+            coluna_dias_uteis = self._buscar_coluna(
+                colunas,
+                {'dias uteis', 'dias uteis du', 'dias util', 'dias teis', 'du'}
+            )
+            coluna_meses = self._buscar_coluna(
+                colunas,
+                {'meses futuros', 'meses futuro', 'prazo', 'meses'}
+            )
+            coluna_taxa_252 = self._buscar_coluna(
+                colunas,
+                {
+                    '252', 'taxa 252', 'taxa 252 dias uteis', 'taxa',
+                    'preco taxa', 'pre o taxa', 'preco', 'pre o',
+                    'di pre', 'di x pre', 'di pre 252'
+                }
+            )
+            coluna_taxa_360 = self._buscar_coluna(
+                colunas,
+                {'360', 'taxa 360', 'taxa 360 dias corridos'}
+            )
+
+            if coluna_taxa_252 is None:
+                continue
+
+            resultado = pd.DataFrame(index=candidato.index)
+
+            if coluna_dias_corridos is not None:
+                resultado['dias_corridos'] = self._converter_coluna_numerica(candidato[coluna_dias_corridos])
+            elif coluna_meses is not None:
+                meses = self._converter_coluna_numerica(candidato[coluna_meses])
+                resultado['dias_corridos'] = (meses * 30.44).round()
+                resultado['meses_futuros'] = meses
+            else:
+                continue
+
+            if coluna_dias_uteis is not None:
+                resultado['dias_uteis'] = self._converter_coluna_numerica(candidato[coluna_dias_uteis])
+
+            resultado['252'] = self._converter_coluna_numerica(candidato[coluna_taxa_252])
+            resultado['360'] = (
+                self._converter_coluna_numerica(candidato[coluna_taxa_360])
+                if coluna_taxa_360 is not None
+                else resultado['252']
+            )
+            resultado['taxa_252_original'] = candidato[coluna_taxa_252].astype(str)
+            resultado['taxa_360_original'] = (
+                candidato[coluna_taxa_360].astype(str)
+                if coluna_taxa_360 is not None
+                else candidato[coluna_taxa_252].astype(str)
+            )
+            resultado['data_arquivo'] = self.data_arquivo
+
+            resultado = resultado.dropna(subset=['dias_corridos', '252']).copy()
+            resultado = resultado[
+                (resultado['dias_corridos'] >= 1)
+                & (resultado['dias_corridos'] <= 12799)
+            ].copy()
+
+            if not resultado.empty:
+                resultado['dias_corridos'] = resultado['dias_corridos'].round().astype(int)
+                if 'dias_uteis' in resultado.columns:
+                    resultado['dias_uteis'] = resultado['dias_uteis'].round().astype('Int64')
+                return resultado
+
+        return None
+
+    def _promover_linha_cabecalho(self, df):
+        """
+        Encontra cabecalho quando a planilha tem linhas introdutorias antes da tabela.
+        """
+        try:
+            df_raw = df.copy().dropna(how='all')
+            limite = min(len(df_raw), 20)
+
+            for posicao in range(limite):
+                valores = [
+                    self._normalizar_nome_coluna(valor)
+                    for valor in df_raw.iloc[posicao].tolist()
+                ]
+                possui_dias = any(valor in {'dias corridos', 'dias uteis', 'dias util', 'dias teis'} for valor in valores)
+                possui_taxa = any(valor in {'preco taxa', 'pre o taxa', 'taxa', '252', 'di pre'} for valor in valores)
+
+                if possui_dias and possui_taxa:
+                    promovido = df_raw.iloc[posicao + 1:].copy()
+                    promovido.columns = [str(valor).strip() for valor in df_raw.iloc[posicao].tolist()]
+                    return promovido.reset_index(drop=True)
+        except Exception:
+            return None
+
+        return None
+
+    def _normalizar_nome_coluna(self, valor):
+        """
+        Normaliza nomes para comparar colunas com ou sem acento e pontuacao.
+        """
+        texto = '' if valor is None else str(valor)
+        texto = unicodedata.normalize('NFKD', texto)
+        texto = ''.join(char for char in texto if not unicodedata.combining(char))
+        texto = texto.lower().strip()
+        texto = re.sub(r'[^a-z0-9]+', ' ', texto)
+        return re.sub(r'\s+', ' ', texto).strip()
+
+    def _buscar_coluna(self, colunas_normalizadas, nomes_aceitos):
+        """
+        Retorna a primeira coluna cujo nome normalizado esta nos sinonimos aceitos.
+        """
+        for nome_aceito in nomes_aceitos:
+            if nome_aceito in colunas_normalizadas:
+                return colunas_normalizadas[nome_aceito]
+
+        for nome_normalizado, coluna_original in colunas_normalizadas.items():
+            if self._coluna_equivale(nome_normalizado, nomes_aceitos):
+                return coluna_original
+
+        return None
+
+    def _coluna_equivale(self, nome_normalizado, nomes_aceitos):
+        """
+        Trata cabecalhos com acentos degradados pelo Windows/Excel.
+        """
+        if 'dias corridos' in nomes_aceitos:
+            return 'dias' in nome_normalizado and 'corrid' in nome_normalizado
+
+        if 'dias uteis' in nomes_aceitos:
+            return (
+                'dias' in nome_normalizado
+                and (
+                    'uteis' in nome_normalizado
+                    or 'util' in nome_normalizado
+                    or 'teis' in nome_normalizado
+                )
+            )
+
+        if 'preco taxa' in nomes_aceitos:
+            return 'taxa' in nome_normalizado and (
+                'preco' in nome_normalizado
+                or 'pre o' in nome_normalizado
+                or nome_normalizado == 'taxa'
+            )
+
+        return False
+
+    def _converter_coluna_numerica(self, serie):
+        """
+        Converte numeros brasileiros preservando celulas numericas do Excel.
+        """
+        return serie.apply(self._extrair_numero_brasileiro)
+
     def obter_estatisticas(self):
         """
         Retorna estatísticas dos dados carregados

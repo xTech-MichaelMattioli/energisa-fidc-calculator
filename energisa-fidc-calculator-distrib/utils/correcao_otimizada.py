@@ -25,7 +25,7 @@ def otimizar_curva_di_pre(df_di_pre: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["meses_futuros"]).copy()
     df = df[df["meses_futuros"] > 0].copy()
 
-    df["mes_ref"] = df["meses_futuros"].round().astype(int)
+    df["mes_ref"] = df["meses_futuros"].round().astype(int).clip(lower=1)
     df["dist_mes_ref"] = (df["meses_futuros"] - df["mes_ref"]).abs()
 
     ordenacao = ["mes_ref", "dist_mes_ref"]

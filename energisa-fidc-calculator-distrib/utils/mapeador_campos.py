@@ -81,11 +81,18 @@ class MapeadorCampos:
                 mapeamento['contrato'] = col
             
             # Valor principal
-            elif any(termo in col_lower for termo in ['fatura', 'faturas']) and 'valor_principal' not in mapeamento:
+            elif (
+                any(termo in col_lower for termo in ['fatura', 'faturas', 'valor principal', 'principal', 'valor cedido'])
+                and not any(termo in col_lower for termo in ['nao cedido', 'não cedido', 'n cedido', 'nao_cedido', 'não_cedido'])
+                and 'valor_principal' not in mapeamento
+            ):
                 mapeamento['valor_principal'] = col
 
             # Valor não cedido
-            elif any(termo in col_lower for termo in ['cedido']) and 'valor_nao_cedido' not in mapeamento:
+            elif (
+                any(termo in col_lower for termo in ['nao cedido', 'não cedido', 'n cedido', 'nao_cedido', 'não_cedido'])
+                and 'valor_nao_cedido' not in mapeamento
+            ):
                 mapeamento['valor_nao_cedido'] = col
 
             # Valor Terceiro
